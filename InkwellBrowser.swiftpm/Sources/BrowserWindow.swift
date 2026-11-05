@@ -856,6 +856,28 @@ final class BrowserWindow: UIViewController {
         }
     }
 
+    /// A small banner at the top of the page (used for extension notifications).
+    func showToast(_ text: String) {
+        let label = PaddingLabel()
+        label.text = text
+        label.numberOfLines = 3
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.textColor = .label
+        label.backgroundColor = .secondarySystemBackground
+        label.layer.cornerRadius = 12
+        label.layer.masksToBounds = true
+        label.alpha = 0
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -12),
+            label.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
+        ])
+        UIView.animate(withDuration: 0.2) { label.alpha = 1 }
+        UIView.animate(withDuration: 0.3, delay: 4, options: []) { label.alpha = 0 } completion: { _ in label.removeFromSuperview() }
+    }
+
     func showHistory() {
         let view = HistoryView(open: { [weak self] url in self?.navigate(to: url) })
         let host = UIHostingController(rootView: view)
@@ -1162,5 +1184,16 @@ enum FirefoxAddons {
         let parts = url.pathComponents
         guard let i = parts.firstIndex(of: "addon"), i + 1 < parts.count else { return nil }
         return parts[i + 1]
+    }
+}
+
+final class PaddingLabel: UILabel {
+    override func drawText(in rect: CGRect) {
+        super.drawText(in: rect.inset(by: UIEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)))
+    }
+
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + 28, height: size.height + 20)
     }
 }

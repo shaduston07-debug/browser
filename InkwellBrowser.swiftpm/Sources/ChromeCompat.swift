@@ -53,6 +53,13 @@ enum ExtensionPatcher {
             manifest["permissions"] = permissions
             changed = true
         }
+        // WebKit only knows "declarativeNetRequest"; Chrome's host-access variant would leave the API missing.
+        if permissions.contains(where: { ($0 as? String) == "declarativeNetRequestWithHostAccess" }),
+           !permissions.contains(where: { ($0 as? String) == "declarativeNetRequest" }) {
+            permissions.append("declarativeNetRequest")
+            manifest["permissions"] = permissions
+            changed = true
+        }
 
         // 3. Load the layer before the background code.
         if var background = manifest["background"] as? [String: Any] {
@@ -210,6 +217,12 @@ enum ExtensionPatcher {
 
   // ---------- diagnostics: forward console output to Inkwell's Extension Console ----------
 
+  const isBackground = (() => {
+    try {
+      if (typeof document === "undefined") return true; // service worker
+      return g.location && g.location.pathname === "/__inkwell_background.html";
+    } catch (e) { return false; }
+  })();
   const where = (() => { try { return (g.location && g.location.pathname) || "background"; } catch (e) { return "?"; } })();
   let logBudget = 300;
   setInterval(() => { logBudget = 300; }, 60000);
@@ -597,11 +610,15 @@ enum ExtensionPatcher {
     catch (e) { try { ns.runtime.onMessageExternal = externalEvent; } catch (e2) { /* read-only */ } }
   }
 
-  try {
+  if (isBackground) try {
     runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg && msg.__inkwellKeepAlive === true) { sendResponse(true); return false; }
       if (msg && msg.__inkwellLog === true) { sendLog(msg.level || "info", ["[" + (msg.source || "content") + "] " + msg.text]); return false; }
       if (!msg || msg.__inkwellExternal !== true) return false;
+      if (externalListeners.size === 0) {
+        sendLog("warn", ["Website message (" + (msg.message && msg.message.type) + ") arrived before the extension registered onMessageExternal"]);
+        return false;
+      }
       const externalSender = { origin: msg.origin, url: msg.url, tab: sender && sender.tab, frameId: sender && sender.frameId };
       let responded = false;
       let async = false;
@@ -622,6 +639,59 @@ enum ExtensionPatcher {
     });
   } catch (e) { /* no runtime.onMessage in this context */ }
 
+  // ---------- APIs WebKit doesn't have: notifications, downloads, declarativeNetRequest enums ----------
+
+  let nextNotificationId = 1;
+  const notifications = {
+    TemplateType: { BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" },
+    PermissionLevel: { GRANTED: "granted", DENIED: "denied" },
+    create: wrap(async (idOrOptions, maybeOptions) => {
+      const id = typeof idOrOptions === "string" ? idOrOptions : "inkwell-" + nextNotificationId++;
+      const options = (typeof idOrOptions === "string" ? maybeOptions : idOrOptions) || {};
+      native("notifications.create", { id, title: options.title || "", message: options.message || "" }).catch(() => {});
+      return id;
+    }),
+    update: wrap(async () => true),
+    clear: wrap(async () => true),
+    getAll: wrap(async () => ({})),
+    getPermissionLevel: wrap(async () => "granted"),
+    onClicked: makeEvent(), onClosed: makeEvent(), onButtonClicked: makeEvent(), onShowSettings: makeEvent(),
+    onPermissionLevelChanged: makeEvent(),
+  };
+
+  let nextDownloadId = 1;
+  const downloads = {
+    download: wrap(async (options) => {
+      const id = nextDownloadId++;
+      await native("downloads.download", { url: options && options.url, filename: (options && options.filename) || "" });
+      return id;
+    }),
+    search: wrap(async () => []),
+    pause: wrap(async () => undefined), resume: wrap(async () => undefined), cancel: wrap(async () => undefined),
+    erase: wrap(async () => []), open: wrap(async () => undefined), show: () => true, showDefaultFolder: () => undefined,
+    onCreated: makeEvent(), onChanged: makeEvent(), onErased: makeEvent(), onDeterminingFilename: makeEvent(),
+  };
+
+  const dnrEnums = {
+    RuleActionType: { BLOCK: "block", REDIRECT: "redirect", ALLOW: "allow", UPGRADE_SCHEME: "upgradeScheme",
+      MODIFY_HEADERS: "modifyHeaders", ALLOW_ALL_REQUESTS: "allowAllRequests" },
+    HeaderOperation: { APPEND: "append", SET: "set", REMOVE: "remove" },
+    ResourceType: { MAIN_FRAME: "main_frame", SUB_FRAME: "sub_frame", STYLESHEET: "stylesheet", SCRIPT: "script",
+      IMAGE: "image", FONT: "font", OBJECT: "object", XMLHTTPREQUEST: "xmlhttprequest", PING: "ping",
+      CSP_REPORT: "csp_report", MEDIA: "media", WEBSOCKET: "websocket", WEBTRANSPORT: "webtransport",
+      WEBBUNDLE: "webbundle", OTHER: "other" },
+    DomainType: { FIRST_PARTY: "firstParty", THIRD_PARTY: "thirdParty" },
+    RequestMethod: { CONNECT: "connect", DELETE: "delete", GET: "get", HEAD: "head", OPTIONS: "options",
+      PATCH: "patch", POST: "post", PUT: "put", OTHER: "other" },
+  };
+  const dnrStub = Object.assign({
+    updateSessionRules: wrap(async () => undefined), updateDynamicRules: wrap(async () => undefined),
+    getSessionRules: wrap(async () => []), getDynamicRules: wrap(async () => []),
+    updateEnabledRulesets: wrap(async () => undefined), getEnabledRulesets: wrap(async () => []),
+    isRegexSupported: wrap(async () => ({ isSupported: true })),
+    MAX_NUMBER_OF_SESSION_RULES: 5000, MAX_NUMBER_OF_DYNAMIC_RULES: 5000,
+  }, dnrEnums);
+
   // ---------- install ----------
 
   for (const ns of namespaces) {
@@ -629,6 +699,18 @@ enum ExtensionPatcher {
     define(ns, "debugger", debuggerAPI);
     define(ns, "tabGroups", tabGroups);
     define(ns, "offscreen", offscreen);
+    define(ns, "notifications", notifications);
+    define(ns, "downloads", downloads);
+    const dnr = define(ns, "declarativeNetRequest", dnrStub);
+    if (dnr && dnr !== dnrStub) {
+      // WebKit's own API: fill in any missing enum objects/values Chrome code expects.
+      for (const [name, values] of Object.entries(dnrEnums)) {
+        const target = define(dnr, name, Object.assign({}, values));
+        if (target && target !== values) {
+          for (const [k, v] of Object.entries(values)) { try { if (target[k] === undefined) target[k] = v; } catch (e) { /* frozen */ } }
+        }
+      }
+    }
     const identity = define(ns, "identity", {});
     if (identity) for (const [name, value] of Object.entries(identityMembers)) define(identity, name, value);
     if (ns.tabs) {
@@ -989,6 +1071,34 @@ final class ChromeCompat {
 
         case "offscreen.has":
             reply(success(offscreenDocuments[key] != nil))
+
+        case "notifications.create":
+            let title = args["title"] as? String ?? ""
+            let text = args["message"] as? String ?? ""
+            ExtensionLogStore.shared.add(extension: context.webExtension.displayName ?? "Extension", level: "info",
+                                         where: "notification", text: "\(title): \(text)")
+            WindowRegistry.shared.focusedOrAny?.showToast(title.isEmpty ? text : "\(title) — \(text)")
+            reply(success(nil))
+
+        case "downloads.download":
+            guard let urlString = args["url"] as? String, let url = URL(string: urlString) else {
+                reply(failure("Invalid download URL."))
+                return
+            }
+            if url.scheme == "data" || url.scheme == "blob" {
+                // Can't hand these to a tab reliably; save data: URLs directly.
+                if let data = try? Data(contentsOf: url) {
+                    let name = (args["filename"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "download"
+                    let file = FileManager.default.temporaryDirectory.appendingPathComponent((name as NSString).lastPathComponent)
+                    try? data.write(to: file)
+                    if let presenter = UIApplication.topViewController() {
+                        presenter.present(UIDocumentPickerViewController(forExporting: [file], asCopy: true), animated: true)
+                    }
+                }
+            } else {
+                WindowRegistry.shared.focusedOrAny?.openTab(url: url, select: false, insertAfterActive: true)
+            }
+            reply(success(nil))
 
         case "identity.launchWebAuthFlow":
             guard let urlString = args["url"] as? String, let url = URL(string: urlString),
