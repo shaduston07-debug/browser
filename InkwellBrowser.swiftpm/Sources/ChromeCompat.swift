@@ -11,6 +11,8 @@ enum ExtensionPatcher {
     static let workerWrapperName = "__inkwell_sw.js"
     static let pageShimFileName = "__inkwell_page.js"
     static let bridgeFileName = "__inkwell_bridge.js"
+    static let keepAlivePageName = "__inkwell_keepalive.html"
+    static let keepAliveScriptName = "__inkwell_keepalive.js"
 
     static func patch(_ root: URL, storeID: String?) {
         let fm = FileManager.default
@@ -23,6 +25,12 @@ enum ExtensionPatcher {
         let metaJSON = (try? JSONSerialization.data(withJSONObject: meta)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let script = "globalThis.__INKWELL__ = \(metaJSON);\n" + compatScript
         try? script.write(to: root.appendingPathComponent(compatFileName), atomically: true, encoding: .utf8)
+
+        // Hidden page that keeps the background worker (and its connections) alive.
+        let keepAliveHTML = "<!doctype html><html><head><script src=\"/\(compatFileName)\"></script>"
+            + "<script src=\"/\(keepAliveScriptName)\"></script></head><body></body></html>"
+        try? keepAliveHTML.write(to: root.appendingPathComponent(keepAlivePageName), atomically: true, encoding: .utf8)
+        try? keepAliveScript.write(to: root.appendingPathComponent(keepAliveScriptName), atomically: true, encoding: .utf8)
 
         var changed = false
 
@@ -522,6 +530,7 @@ enum ExtensionPatcher {
 
   try {
     runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.__inkwellKeepAlive === true) { sendResponse(true); return false; }
       if (!msg || msg.__inkwellExternal !== true) return false;
       const externalSender = { origin: msg.origin, url: msg.url, tab: sender && sender.tab, frameId: sender && sender.frameId };
       let responded = false;
@@ -557,6 +566,21 @@ enum ExtensionPatcher {
       define(ns.tabs, "ungroup", tabsUngroup);
     }
   }
+})();
+"""#
+
+    static let keepAliveScript = #"""
+// Inkwell Browser — pings the background worker so iPadOS doesn't suspend it while the app is open.
+(() => {
+  const api = globalThis.browser || globalThis.chrome;
+  const ping = () => {
+    try {
+      const result = api.runtime.sendMessage({ __inkwellKeepAlive: true });
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch (e) { /* background is restarting */ }
+  };
+  ping();
+  setInterval(ping, 15000);
 })();
 """#
 
@@ -640,6 +664,35 @@ final class ChromeCompat {
 
     private var panels: [ObjectIdentifier: PanelState] = [:]
     private var offscreenDocuments: [ObjectIdentifier: WKWebView] = [:]
+    private var keepAliveViews: [ObjectIdentifier: WKWebView] = [:]
+
+    /// Adds a web view to a window invisibly (1×1, nearly transparent, behind everything) so
+    /// WebKit treats it as visible and doesn't throttle its timers.
+    private func hostHidden(_ webView: WKWebView) {
+        webView.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        webView.alpha = 0.02
+        webView.isUserInteractionEnabled = false
+        webView.accessibilityElementsHidden = true
+        if let host = WindowRegistry.shared.focusedOrAny?.view {
+            host.insertSubview(webView, at: 0)
+        }
+    }
+
+    /// Re-hosts hidden pages when a window appears (e.g. extensions loaded before the first window).
+    func adoptHiddenViews(into window: BrowserWindow) {
+        for webView in Array(keepAliveViews.values) + Array(offscreenDocuments.values) where webView.window == nil {
+            window.view.insertSubview(webView, at: 0)
+        }
+    }
+
+    func startKeepAlive(for context: WKWebExtensionContext) {
+        let key = ObjectIdentifier(context)
+        guard keepAliveViews[key] == nil, let configuration = context.webViewConfiguration else { return }
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        hostHidden(webView)
+        webView.load(URLRequest(url: context.baseURL.appendingPathComponent(ExtensionPatcher.keepAlivePageName)))
+        keepAliveViews[key] = webView
+    }
 
     // Side panel queries used by the browser window.
 
@@ -711,12 +764,8 @@ final class ChromeCompat {
                 reply(failure("Couldn't create the offscreen document."))
                 return
             }
-            let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
-            // Keep it in a window (invisible) so the page isn't suspended.
-            webView.alpha = 0
-            webView.isUserInteractionEnabled = false
-            webView.frame.origin = CGPoint(x: -2000, y: -2000)
-            WindowRegistry.shared.focusedOrAny?.view.addSubview(webView)
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            hostHidden(webView)
             webView.load(URLRequest(url: url))
             offscreenDocuments[key] = webView
             reply(success(nil))
@@ -751,6 +800,7 @@ final class ChromeCompat {
     func contextWillUnload(_ context: WKWebExtensionContext) {
         let key = ObjectIdentifier(context)
         offscreenDocuments.removeValue(forKey: key)?.removeFromSuperview()
+        keepAliveViews.removeValue(forKey: key)?.removeFromSuperview()
         panels[key] = nil
         WindowRegistry.shared.windows.forEach { $0.hideSidePanel(onlyFor: context) }
     }

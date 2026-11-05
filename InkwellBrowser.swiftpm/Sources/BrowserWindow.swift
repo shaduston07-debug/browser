@@ -89,6 +89,7 @@ final class BrowserWindow: UIViewController {
         buildLayout()
         wireUpCallbacks()
         WindowRegistry.shared.add(self)
+        ChromeCompat.shared.adoptHiddenViews(into: self)
 
         Task { [weak self] in
             await ExtensionManager.shared.waitUntilReady()

@@ -106,6 +106,7 @@ final class ExtensionManager: NSObject, ObservableObject {
 
         try controller.load(context)
         contexts[record.id] = context
+        ChromeCompat.shared.startKeepAlive(for: context)
         loadErrors[record.id] = nil
     }
 
