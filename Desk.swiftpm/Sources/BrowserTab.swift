@@ -44,7 +44,7 @@ final class BrowserTab: NSObject {
                 MainActor.assumeIsolated { if let self { notify(self, .title) } }
             },
             webView.observe(\.url) { [weak self] _, _ in
-                MainActor.assumeIsolated { if let self { notify(self, .url) } }
+                MainActor.assumeIsolated { if let self { notify(self, .URL) } }
             },
             webView.observe(\.isLoading) { [weak self] _, _ in
                 MainActor.assumeIsolated { if let self { notify(self, .loading) } }
@@ -223,6 +223,7 @@ final class WindowRegistry {
 
 // MARK: - Session & bookmarks persistence
 
+@MainActor
 enum SessionStore {
     private static let key = "session.tabs"
     private static let selectedKey = "session.selected"

@@ -45,7 +45,7 @@ final class BrowserWindow: UIViewController {
     private lazy var extensionsMenuButton: UIButton = {
         let button = Self.toolbarButton("puzzlepiece.extension", "Extensions") {}
         button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
-            done(self?.extensionsMenuElements() ?? [])
+            done(MainActor.assumeIsolated { self?.extensionsMenuElements() ?? [] })
         }])
         button.showsMenuAsPrimaryAction = true
         return button
@@ -54,7 +54,7 @@ final class BrowserWindow: UIViewController {
     private lazy var mainMenuButton: UIButton = {
         let button = Self.toolbarButton("ellipsis.circle", "More") {}
         button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
-            done(self?.mainMenuElements() ?? [])
+            done(MainActor.assumeIsolated { self?.mainMenuElements() ?? [] })
         }])
         button.showsMenuAsPrimaryAction = true
         return button
@@ -751,11 +751,13 @@ extension BrowserWindow: WKUIDelegate {
         let extensionItems = ExtensionManager.shared.activeContexts.flatMap { $0.context.menuItems(for: tab) }
 
         let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { suggested in
-            var children = leading + suggested
-            if !extensionItems.isEmpty {
-                children.append(UIMenu(options: .displayInline, children: extensionItems))
+            MainActor.assumeIsolated {
+                var children: [UIMenuElement] = leading + suggested
+                if !extensionItems.isEmpty {
+                    children.append(UIMenu(options: .displayInline, children: extensionItems))
+                }
+                return UIMenu(children: children)
             }
-            return UIMenu(children: children)
         }
         completionHandler(configuration)
     }

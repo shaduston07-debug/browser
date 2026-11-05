@@ -181,7 +181,7 @@ enum WebsiteDataCleaner {
     static func clearAll() {
         let store = WKWebsiteDataStore.default()
         store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
-            Alerts.show(title: "Website data cleared", message: nil)
+            Task { @MainActor in Alerts.show(title: "Website data cleared", message: nil) }
         }
     }
 }

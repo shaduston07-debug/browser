@@ -36,12 +36,10 @@ struct BrowserWindowView: UIViewControllerRepresentable {
 extension UIApplication {
     /// The top-most view controller in the foreground-active window, used for alerts and sheets.
     static func topViewController(preferring window: UIWindow? = nil) -> UIViewController? {
-        let keyWindow = window ?? shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .sorted { lhs, _ in lhs.activationState == .foregroundActive }
-            .flatMap(\.windows)
-            .first(where: \.isKeyWindow)
-            ?? shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.windows.first }.first
+        let scenes: [UIWindowScene] = shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScenes: [UIWindowScene] = scenes.filter { $0.activationState == .foregroundActive }
+        let candidates: [UIWindow] = (activeScenes + scenes).flatMap { $0.windows }
+        let keyWindow: UIWindow? = window ?? candidates.first(where: { $0.isKeyWindow }) ?? candidates.first
 
         var top = keyWindow?.rootViewController
         while let presented = top?.presentedViewController, !presented.isBeingDismissed {
@@ -51,6 +49,7 @@ extension UIApplication {
     }
 }
 
+@MainActor
 enum Alerts {
     static func show(title: String, message: String?, on presenter: UIViewController? = nil) {
         guard let presenter = presenter ?? UIApplication.topViewController() else { return }
