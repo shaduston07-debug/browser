@@ -19,11 +19,27 @@ final class BrowserWindow: UIViewController {
     private let contentContainer = UIView()
     private let progressBar = UIProgressView(progressViewStyle: .bar)
     private let addressField = UITextField()
+    private let suggestionsView = SuggestionsView()
     private let extensionButtonStack = UIStackView()
     private var extensionButtons: [UUID: ExtensionActionButton] = [:]
     private var bookmarksBarHeight: NSLayoutConstraint!
     private var cancellables = Set<AnyCancellable>()
     private var badgeTimer: Timer?
+
+    private lazy var startPage: UIHostingController<StartPageView> = {
+        let host = UIHostingController(rootView: StartPageView(open: { [weak self] url in self?.navigate(to: url) }))
+        addChild(host)
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            host.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            host.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
+        ])
+        host.didMove(toParent: self)
+        return host
+    }()
 
     private lazy var backButton = Self.toolbarButton("chevron.left", "Back") { [weak self] in self?.activeTab?.webView.goBack() }
     private lazy var forwardButton = Self.toolbarButton("chevron.right", "Forward") { [weak self] in self?.activeTab?.webView.goForward() }
@@ -32,7 +48,7 @@ final class BrowserWindow: UIViewController {
 
     private lazy var installButton: UIButton = {
         var config = UIButton.Configuration.filled()
-        config.title = "Add to Desk"
+        config.title = "Add to Inkwell"
         config.image = UIImage(systemName: "puzzlepiece.extension.fill")
         config.imagePadding = 6
         config.cornerStyle = .capsule
@@ -189,6 +205,14 @@ final class BrowserWindow: UIViewController {
             progressBar.bottomAnchor.constraint(equalTo: separator.bottomAnchor),
             progressBar.heightAnchor.constraint(equalToConstant: 2),
         ])
+
+        suggestionsView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(suggestionsView)
+        NSLayoutConstraint.activate([
+            suggestionsView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: -2),
+            suggestionsView.leadingAnchor.constraint(equalTo: addressField.leadingAnchor),
+            suggestionsView.trailingAnchor.constraint(equalTo: addressField.trailingAnchor),
+        ])
     }
 
     private func wireUpCallbacks() {
@@ -208,6 +232,24 @@ final class BrowserWindow: UIViewController {
             if newTab { self.openTab(url: url, select: false, insertAfterActive: true) } else { self.navigate(to: url) }
         }
         bookmarksBar.reload()
+
+        addressField.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.suggestionsView.update(for: self.addressField.text ?? "")
+        }, for: .editingChanged)
+        suggestionsView.onPick = { [weak self] suggestion in self?.pick(suggestion) }
+
+        // Press and hold Back / Forward for the page history, like on a Mac.
+        backButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
+            done(MainActor.assumeIsolated { self?.navigationHistoryMenu(back: true) ?? [] })
+        }])
+        forwardButton.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
+            done(MainActor.assumeIsolated { self?.navigationHistoryMenu(back: false) ?? [] })
+        }])
+
+        NotificationCenter.default.publisher(for: FaviconStore.didChange)
+            .sink { [weak self] _ in self?.reloadTabStrip() }
+            .store(in: &cancellables)
 
         ExtensionManager.shared.$revision
             .receive(on: RunLoop.main)
@@ -338,7 +380,8 @@ final class BrowserWindow: UIViewController {
 
     private func reloadTabStrip() {
         let selected = activeTab.flatMap { tabs.firstIndex(of: $0) } ?? -1
-        tabStrip.update(items: tabs.map { ($0.title, $0.webView.isLoading) }, selected: selected)
+        tabStrip.update(items: tabs.map { ($0.title, $0.webView.isLoading, FaviconStore.shared.icon(for: $0.webView.url)) },
+                        selected: selected)
     }
 
     private func tabMenu(at index: Int) -> UIMenu? {
@@ -382,6 +425,10 @@ final class BrowserWindow: UIViewController {
 
         let isStorePage = ChromeWebStore.extensionID(from: webView.url) != nil || FirefoxAddons.slug(from: webView.url) != nil
         if installButton.isHidden == isStorePage { installButton.isHidden = !isStorePage }
+
+        let showStartPage = tab.isBlank && !webView.isLoading
+        startPage.view.isHidden = !showStartPage
+        if showStartPage { contentContainer.bringSubviewToFront(startPage.view) }
     }
 
     private func reloadOrStop() {
@@ -529,6 +576,7 @@ final class BrowserWindow: UIViewController {
             ]),
             UIMenu(options: .displayInline, children: [
                 UIAction(title: "Extensions…", image: UIImage(systemName: "puzzlepiece.extension")) { [weak self] _ in self?.showExtensionsManager() },
+                UIAction(title: "History", image: UIImage(systemName: "clock")) { [weak self] _ in self?.showHistory() },
                 UIAction(title: "Settings…", image: UIImage(systemName: "gearshape")) { [weak self] _ in self?.showSettings() },
             ]),
         ]
@@ -590,7 +638,8 @@ final class BrowserWindow: UIViewController {
                      _ plist: Any? = nil) -> UIKeyCommand {
             let c = UIKeyCommand(title: title, action: action, input: input, modifierFlags: flags, propertyList: plist)
             // Only ⌘/⌃ shortcuts may override the system; plain keys must always reach text fields.
-            c.wantsPriorityOverSystemBehavior = !flags.isEmpty
+            c.wantsPriorityOverSystemBehavior = !flags.isEmpty || input == UIKeyCommand.inputUpArrow
+                || input == UIKeyCommand.inputDownArrow
             return c
         }
         var list: [UIKeyCommand] = [
@@ -618,8 +667,13 @@ final class BrowserWindow: UIViewController {
             command("Toggle Bookmarks Bar", "b", [.command, .shift], #selector(cmdToggleBookmarksBar)),
             command("Extensions", "e", [.command, .shift], #selector(cmdExtensions)),
             command("Settings", ",", .command, #selector(cmdSettings)),
+            command("Show History", "y", .command, #selector(cmdHistory)),
             command("Stop", UIKeyCommand.inputEscape, [], #selector(cmdEscape)),
         ]
+        if !suggestionsView.isHidden {
+            list.append(command("Next Suggestion", UIKeyCommand.inputDownArrow, [], #selector(cmdSuggestionDown)))
+            list.append(command("Previous Suggestion", UIKeyCommand.inputUpArrow, [], #selector(cmdSuggestionUp)))
+        }
         for i in 1...9 {
             list.append(command(i == 9 ? "Show Last Tab" : "Show Tab \(i)", "\(i)", .command, #selector(cmdSelectTab(_:)), i))
         }
@@ -648,7 +702,9 @@ final class BrowserWindow: UIViewController {
     }
 
     @objc private func cmdEscape() {
-        if addressField.isFirstResponder {
+        if !suggestionsView.isHidden {
+            suggestionsView.hide()
+        } else if addressField.isFirstResponder {
             addressField.resignFirstResponder()
             updateToolbar()
         } else {
@@ -669,6 +725,37 @@ final class BrowserWindow: UIViewController {
         select(tabs[(i + delta + tabs.count) % tabs.count])
     }
 
+    private func navigationHistoryMenu(back: Bool) -> [UIMenuElement] {
+        guard let webView = activeTab?.webView else { return [] }
+        let list = webView.backForwardList
+        let items = back ? Array(list.backList.reversed()) : list.forwardList
+        return items.prefix(20).map { item in
+            let title = item.title?.isEmpty == false ? item.title! : (item.url.host ?? item.url.absoluteString)
+            return UIAction(title: title, image: FaviconStore.shared.icon(for: item.url)) { _ in
+                webView.go(to: item)
+            }
+        }
+    }
+
+    func showHistory() {
+        let view = HistoryView(open: { [weak self] url in self?.navigate(to: url) })
+        let host = UIHostingController(rootView: view)
+        host.modalPresentationStyle = .formSheet
+        present(host, animated: true)
+    }
+
+    fileprivate func pick(_ suggestion: Suggestion) {
+        suggestionsView.hide()
+        guard let url = suggestion.url else { return }
+        navigate(to: url)
+        addressField.resignFirstResponder()
+        activeTab?.webView.becomeFirstResponder()
+    }
+
+    @objc private func cmdHistory() { showHistory() }
+    @objc private func cmdSuggestionDown() { suggestionsView.moveHighlight(by: 1) }
+    @objc private func cmdSuggestionUp() { suggestionsView.moveHighlight(by: -1) }
+
     fileprivate func tab(for webView: WKWebView) -> BrowserTab? {
         tabs.first { $0.webView === webView }
     }
@@ -682,10 +769,16 @@ extension BrowserWindow: UITextFieldDelegate {
     }
 
     func textFieldDidEndEditing(_ textField: UITextField) {
+        suggestionsView.hide()
         updateToolbar()
     }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        if !suggestionsView.isHidden, let suggestion = suggestionsView.highlightedItem {
+            pick(suggestion)
+            return false
+        }
+        suggestionsView.hide()
         if let url = AppSettings.url(fromInput: textField.text ?? "") {
             navigate(to: url)
         }
@@ -824,6 +917,20 @@ extension BrowserWindow: WKNavigationDelegate {
         </style></head><body><div><h1>This page couldn't be opened</h1><p>\(message)</p></div></body></html>
         """
         webView.loadHTMLString(html, baseURL: failingURL)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        HistoryStore.shared.record(url: webView.url, title: webView.title)
+        let pageURL = webView.url
+        let script = "(function(){var l=document.querySelector(\"link[rel~='icon'],link[rel='apple-touch-icon']\");return l?l.href:'';})()"
+        webView.evaluateJavaScript(script) { result, _ in
+            let href = result as? String
+            Task { @MainActor in
+                let declared = href.flatMap { $0.isEmpty ? nil : URL(string: $0) }
+                FaviconStore.shared.load(pageURL: pageURL, declaredIcon: declared)
+            }
+        }
+        if let tab = tab(for: webView), tab === activeTab { updateToolbar() }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

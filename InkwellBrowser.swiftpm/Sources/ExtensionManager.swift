@@ -341,7 +341,7 @@ final class ExtensionManager: NSObject, ObservableObject {
                 if enumerator.level <= 3 { return url.deletingLastPathComponent() }
             }
         }
-        throw NSError(domain: "Desk", code: 1, userInfo: [NSLocalizedDescriptionKey:
+        throw NSError(domain: "Inkwell", code: 1, userInfo: [NSLocalizedDescriptionKey:
             "No manifest.json found. Choose an extension folder, or a .zip / .crx / .xpi that contains one."])
     }
 }

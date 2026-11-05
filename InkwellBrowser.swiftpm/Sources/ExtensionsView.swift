@@ -16,7 +16,7 @@ struct ExtensionsView: View {
             List {
                 Section {
                     if manager.records.isEmpty {
-                        Text("No extensions installed yet. Open the Chrome Web Store or Firefox Add-ons, go to any extension's page and tap **Add to Desk** in the toolbar — or import a file below.")
+                        Text("No extensions installed yet. Open the Chrome Web Store or Firefox Add-ons, go to any extension's page and tap **Add to Inkwell** in the toolbar — or import a file below.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }

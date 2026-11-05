@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 @main
-struct DeskApp: App {
+struct InkwellApp: App {
     init() {
         // Start loading installed extensions immediately so they're ready
         // before the first tab finishes its first navigation.
