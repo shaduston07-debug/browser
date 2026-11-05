@@ -62,6 +62,22 @@ Open `InkwellBrowser.swiftpm` in Xcode, select your iPad as the run destination,
 
 Before an extension is added, a dialog shows which sites and permissions it wants, the way desktop Chrome does. Later permission requests are also confirmed in a dialog.
 
+## Chrome compatibility layer
+
+Many Chrome extensions use Chrome-only APIs that WebKit doesn't have. When Inkwell installs or loads an extension, it adds a small script (`__inkwell_compat.js`) that fills these in:
+
+| Chrome API | What Inkwell does |
+|---|---|
+| `chrome.sidePanel` | Shows the extension's panel in a real side panel next to the page. `setPanelBehavior({openPanelOnActionClick})` and `setOptions` are supported. |
+| `chrome.debugger` | Imitates the most common Chrome DevTools commands (see below). Unsupported commands return a clear error. |
+| `chrome.offscreen` | Runs the document in a hidden web view. |
+| `chrome.identity` | `launchWebAuthFlow` opens a sign-in sheet and catches the `https://<id>.chromiumapp.org/` redirect. `getRedirectURL` works too. |
+| `chrome.tabGroups`, `chrome.tabs.group` | Calls succeed, but tabs aren't visually grouped. |
+
+The `chrome.debugger` commands it imitates are: `Runtime.evaluate`, `Runtime.callFunctionOn`, `Page.captureScreenshot`, `Page.navigate`, `Page.reload`, `Page.getLayoutMetrics`, `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent` and `Input.insertText`.
+
+This is what lets agent-style extensions such as Claude's browser extension run. Clicks and typing are simulated inside the page, not sent as real OS input, so a few sites that only accept "trusted" events may ignore them.
+
 ## Limits you should know about
 
 These come from Apple's platform rules, not from Inkwell:

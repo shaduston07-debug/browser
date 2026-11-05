@@ -69,6 +69,7 @@ final class ExtensionManager: NSObject, ObservableObject {
         }
         for record in records {
             do {
+                ExtensionPatcher.patch(folder(for: record), storeID: record.storeID)
                 let ext = try await WKWebExtension(resourceBaseURL: folder(for: record))
                 extensions[record.id] = ext
                 if record.enabled { try activate(record, ext) }
@@ -110,6 +111,7 @@ final class ExtensionManager: NSObject, ObservableObject {
 
     private func deactivate(_ id: UUID) {
         if let context = contexts.removeValue(forKey: id) {
+            ChromeCompat.shared.contextWillUnload(context)
             try? controller.unload(context)
         }
     }
@@ -210,6 +212,7 @@ final class ExtensionManager: NSObject, ObservableObject {
             let rootPath = manifestRoot.resolvingSymlinksInPath().path
             let destinationPath = destination.resolvingSymlinksInPath().path
             let relative = folderName + rootPath.dropFirst(destinationPath.count)
+            ExtensionPatcher.patch(manifestRoot, storeID: storeID)
             let ext = try await WKWebExtension(resourceBaseURL: manifestRoot)
             return PendingInstall(id: id, folderName: folderName, relativePath: String(relative),
                                   webExtension: ext, storeID: storeID, replacing: replacing)
@@ -367,6 +370,17 @@ enum ChromeWebStore {
 // MARK: - WKWebExtensionControllerDelegate
 
 extension ExtensionManager: WKWebExtensionControllerDelegate {
+    /// runtime.sendNativeMessage — used by Inkwell's Chrome compatibility layer.
+    func webExtensionController(_ controller: WKWebExtensionController,
+                                sendMessage message: Any,
+                                toApplicationWithIdentifier applicationIdentifier: String?,
+                                for extensionContext: WKWebExtensionContext,
+                                replyHandler: @escaping (Any?, (any Error)?) -> Void) {
+        ChromeCompat.shared.handle(message, from: extensionContext) { reply in
+            replyHandler(reply, nil)
+        }
+    }
+
     func webExtensionController(_ controller: WKWebExtensionController,
                                 openWindowsFor extensionContext: WKWebExtensionContext) -> [any WKWebExtensionWindow] {
         WindowRegistry.shared.orderedWindows

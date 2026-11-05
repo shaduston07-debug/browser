@@ -168,6 +168,14 @@ extension BrowserTab: WKWebExtensionTab {
         completionHandler(nil)
     }
 
+    /// tabs.captureVisibleTab (also used for emulated DevTools screenshots).
+    func takeSnapshot(using configuration: WKSnapshotConfiguration, for context: WKWebExtensionContext,
+                      completionHandler: @escaping (UIImage?, (any Error)?) -> Void) {
+        webView.takeSnapshot(with: configuration) { image, error in
+            completionHandler(image, error)
+        }
+    }
+
     func activate(for context: WKWebExtensionContext, completionHandler: @escaping ((any Error)?) -> Void) {
         window?.select(self)
         completionHandler(nil)

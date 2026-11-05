@@ -20,6 +20,11 @@ final class BrowserWindow: UIViewController {
     private let progressBar = UIProgressView(progressViewStyle: .bar)
     private let addressField = UITextField()
     private let suggestionsView = SuggestionsView()
+    private let sidePanelContainer = UIView()
+    private let sidePanelTitle = UILabel()
+    private var sidePanelWidth: NSLayoutConstraint!
+    private var sidePanelWebView: WKWebView?
+    private weak var sidePanelContext: WKWebExtensionContext?
     private let extensionButtonStack = UIStackView()
     private var extensionButtons: [UUID: ExtensionActionButton] = [:]
     private var bookmarksBarHeight: NSLayoutConstraint!
@@ -167,7 +172,7 @@ final class BrowserWindow: UIViewController {
         progressBar.trackTintColor = .clear
         progressBar.isHidden = true
 
-        for v in [tabStrip, toolbar, bookmarksBar, separator, contentContainer, progressBar] as [UIView] {
+        for v in [tabStrip, toolbar, bookmarksBar, separator, contentContainer, progressBar, sidePanelContainer] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
@@ -197,7 +202,7 @@ final class BrowserWindow: UIViewController {
 
             contentContainer.topAnchor.constraint(equalTo: separator.bottomAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            contentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            contentContainer.trailingAnchor.constraint(equalTo: sidePanelContainer.leadingAnchor),
             contentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             progressBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -205,6 +210,8 @@ final class BrowserWindow: UIViewController {
             progressBar.bottomAnchor.constraint(equalTo: separator.bottomAnchor),
             progressBar.heightAnchor.constraint(equalToConstant: 2),
         ])
+
+        buildSidePanel(below: separator)
 
         suggestionsView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(suggestionsView)
@@ -475,7 +482,7 @@ final class BrowserWindow: UIViewController {
                 button = ExtensionActionButton()
                 button.addAction(UIAction { [weak self, weak context] _ in
                     guard let self, let context else { return }
-                    context.performAction(for: self.activeTab)
+                    self.extensionButtonTapped(context)
                 }, for: .primaryActionTriggered)
                 extensionButtons[record.id] = button
                 extensionButtonStack.addArrangedSubview(button)
@@ -527,6 +534,11 @@ final class BrowserWindow: UIViewController {
                         manager.openOptions(for: record.id)
                     })
                 }
+            }
+            if let context = manager.contexts[record.id], let panelURL = ChromeCompat.shared.panelURL(for: context) {
+                children.insert(UIAction(title: "Open Side Panel", image: UIImage(systemName: "sidebar.right")) { [weak self] _ in
+                    self?.showSidePanel(for: context, url: panelURL)
+                }, at: min(1, children.count))
             }
             children.append(UIAction(title: record.enabled ? "Turn Off" : "Turn On",
                                      image: UIImage(systemName: record.enabled ? "pause.circle" : "play.circle")) { _ in
@@ -736,6 +748,105 @@ final class BrowserWindow: UIViewController {
             return UIAction(title: title, image: FaviconStore.shared.icon(for: item.url)) { _ in
                 webView.go(to: item)
             }
+        }
+    }
+
+    // MARK: Side panel (chrome.sidePanel)
+
+    private func buildSidePanel(below separator: UIView) {
+        sidePanelContainer.translatesAutoresizingMaskIntoConstraints = false
+        sidePanelContainer.backgroundColor = .systemBackground
+        sidePanelContainer.clipsToBounds = true
+
+        let border = UIView()
+        border.backgroundColor = .separator
+        let header = UIView()
+        header.backgroundColor = .secondarySystemBackground
+        sidePanelTitle.font = .systemFont(ofSize: 15, weight: .semibold)
+        let closeButton = Self.toolbarButton("xmark", "Close Side Panel") { [weak self] in self?.hideSidePanel() }
+        for v in [border, header, sidePanelTitle, closeButton] as [UIView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+        }
+        sidePanelContainer.addSubview(header)
+        sidePanelContainer.addSubview(border)
+        header.addSubview(sidePanelTitle)
+        header.addSubview(closeButton)
+
+        sidePanelWidth = sidePanelContainer.widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            sidePanelContainer.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            sidePanelContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            sidePanelContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            sidePanelWidth,
+            border.leadingAnchor.constraint(equalTo: sidePanelContainer.leadingAnchor),
+            border.topAnchor.constraint(equalTo: sidePanelContainer.topAnchor),
+            border.bottomAnchor.constraint(equalTo: sidePanelContainer.bottomAnchor),
+            border.widthAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
+            header.topAnchor.constraint(equalTo: sidePanelContainer.topAnchor),
+            header.leadingAnchor.constraint(equalTo: border.trailingAnchor),
+            header.trailingAnchor.constraint(equalTo: sidePanelContainer.trailingAnchor),
+            header.heightAnchor.constraint(equalToConstant: 36),
+            sidePanelTitle.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            sidePanelTitle.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            sidePanelTitle.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -8),
+            closeButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -4),
+            closeButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+        ])
+    }
+
+    func showSidePanel(for context: WKWebExtensionContext, url: URL) {
+        if sidePanelContext !== context || sidePanelWebView == nil {
+            sidePanelWebView?.removeFromSuperview()
+            let configuration = context.webViewConfiguration ?? BrowserTab.makeConfiguration()
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            webView.isInspectable = true
+            webView.uiDelegate = self
+            webView.translatesAutoresizingMaskIntoConstraints = false
+            sidePanelContainer.addSubview(webView)
+            NSLayoutConstraint.activate([
+                webView.topAnchor.constraint(equalTo: sidePanelContainer.topAnchor, constant: 36),
+                webView.leadingAnchor.constraint(equalTo: sidePanelContainer.leadingAnchor, constant: 1),
+                webView.trailingAnchor.constraint(equalTo: sidePanelContainer.trailingAnchor),
+                webView.bottomAnchor.constraint(equalTo: sidePanelContainer.bottomAnchor),
+            ])
+            sidePanelWebView = webView
+            sidePanelContext = context
+            webView.load(URLRequest(url: url))
+        } else if sidePanelWebView?.url != url {
+            sidePanelWebView?.load(URLRequest(url: url))
+        }
+        sidePanelTitle.text = context.webExtension.displayName ?? "Side Panel"
+        let width = min(420, max(320, view.bounds.width * 0.32))
+        UIView.animate(withDuration: 0.2) {
+            self.sidePanelWidth.constant = width
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    func hideSidePanel() {
+        UIView.animate(withDuration: 0.2, animations: {
+            self.sidePanelWidth.constant = 0
+            self.view.layoutIfNeeded()
+        }, completion: { _ in
+            self.sidePanelWebView?.removeFromSuperview()
+            self.sidePanelWebView = nil
+            self.sidePanelContext = nil
+        })
+    }
+
+    func hideSidePanel(onlyFor context: WKWebExtensionContext) {
+        if sidePanelContext === context { hideSidePanel() }
+    }
+
+    private func extensionButtonTapped(_ context: WKWebExtensionContext) {
+        if ChromeCompat.shared.opensPanelOnActionClick(context), let url = ChromeCompat.shared.panelURL(for: context) {
+            if sidePanelContext === context, sidePanelWidth.constant > 0 {
+                hideSidePanel()
+            } else {
+                showSidePanel(for: context, url: url)
+            }
+        } else {
+            context.performAction(for: activeTab)
         }
     }
 
