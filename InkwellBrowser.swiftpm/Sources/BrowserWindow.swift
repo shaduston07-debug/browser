@@ -560,6 +560,11 @@ final class BrowserWindow: UIViewController {
             UIAction(title: "Manage Extensions…", image: UIImage(systemName: "puzzlepiece.extension")) { [weak self] _ in
                 self?.showExtensionsManager()
             },
+            UIAction(title: "Extension Console", image: UIImage(systemName: "terminal")) { [weak self] _ in
+                let host = UIHostingController(rootView: NavigationStack { ExtensionConsoleView() })
+                host.modalPresentationStyle = .formSheet
+                self?.present(host, animated: true)
+            },
             UIAction(title: "Chrome Web Store", image: UIImage(systemName: "bag")) { [weak self] _ in
                 self?.openTab(url: ChromeWebStore.home)
             },

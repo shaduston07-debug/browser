@@ -59,6 +59,11 @@ struct ExtensionsView: View {
                     } label: {
                         Label("Load Unpacked Folder…", systemImage: "folder")
                     }
+                    NavigationLink {
+                        ExtensionConsoleView()
+                    } label: {
+                        Label("Extension Console", systemImage: "terminal")
+                    }
                     Button {
                         manager.checkForUpdates()
                     } label: {
@@ -158,5 +163,75 @@ private struct ExtensionRow: View {
                 .labelsHidden()
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Shows what extensions printed to their consoles: errors, warnings and connection events.
+struct ExtensionConsoleView: View {
+    @ObservedObject private var store = ExtensionLogStore.shared
+    @State private var errorsOnly = false
+
+    private var shown: [ExtensionLogEntry] {
+        let all = store.entries.reversed()
+        return errorsOnly ? all.filter { $0.level == "error" || $0.level == "warn" } : Array(all)
+    }
+
+    var body: some View {
+        List {
+            if store.entries.isEmpty {
+                Text("Nothing logged yet. Use an extension, then come back here.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(shown) { entry in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Image(systemName: icon(for: entry.level))
+                            .foregroundStyle(color(for: entry.level))
+                        Text(entry.extensionName).font(.caption.bold())
+                        Text(entry.location).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Text(entry.date.formatted(date: .omitted, time: .standard))
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Text(entry.text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(12)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .navigationTitle("Extension Console")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Toggle(isOn: $errorsOnly) { Label("Errors only", systemImage: "exclamationmark.triangle") }
+                Button {
+                    UIPasteboard.general.string = store.exportText
+                } label: {
+                    Label("Copy All", systemImage: "doc.on.doc")
+                }
+                Button(role: .destructive) {
+                    store.clear()
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func icon(for level: String) -> String {
+        switch level {
+        case "error": return "xmark.octagon.fill"
+        case "warn": return "exclamationmark.triangle.fill"
+        default: return "info.circle"
+        }
+    }
+
+    private func color(for level: String) -> Color {
+        switch level {
+        case "error": return .red
+        case "warn": return .orange
+        default: return .secondary
+        }
     }
 }

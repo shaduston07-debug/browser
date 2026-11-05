@@ -191,6 +191,58 @@ enum ExtensionPatcher {
 
   const manifest = (() => { try { return chromeAPI.runtime.getManifest() || {}; } catch (e) { return {}; } })();
 
+  // ---------- diagnostics: forward console output to Inkwell's Extension Console ----------
+
+  const where = (() => { try { return (g.location && g.location.pathname) || "background"; } catch (e) { return "?"; } })();
+  let logBudget = 300;
+  setInterval(() => { logBudget = 300; }, 60000);
+  const describeArg = (a) => {
+    try {
+      if (typeof a === "string") return a;
+      if (a instanceof Error) return a.stack || a.message;
+      if (a && typeof a === "object" && "message" in a && "name" in a) return a.name + ": " + a.message;
+      return JSON.stringify(a);
+    } catch (e) { return String(a); }
+  };
+  const sendLog = (level, args) => {
+    if (logBudget-- <= 0) return;
+    const text = Array.from(args).map(describeArg).join(" ").slice(0, 2000);
+    native("log", { level, text, where }).catch(() => {});
+  };
+  for (const level of ["error", "warn", "info", "log"]) {
+    const original = console[level];
+    if (typeof original !== "function") continue;
+    console[level] = function (...args) {
+      try { sendLog(level, args); } catch (e) { /* ignore */ }
+      return original.apply(this, args);
+    };
+  }
+  try {
+    g.addEventListener("error", (e) => sendLog("error", ["Uncaught " + (e.message || "error") + " @ " + (e.filename || "") + ":" + (e.lineno || 0)]));
+    g.addEventListener("unhandledrejection", (e) => sendLog("error", ["Unhandled rejection:", e.reason]));
+  } catch (e) { /* no event target */ }
+
+  // Log WebSocket lifecycle (connection problems are otherwise invisible).
+  if (typeof g.WebSocket === "function" && !g.WebSocket.__inkwell) {
+    const NativeWebSocket = g.WebSocket;
+    const redact = (u) => String(u).replace(/([?&](token|key|auth)[^=]*=)[^&]+/gi, "$1…");
+    const Wrapped = function (url, protocols) {
+      const ws = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+      const label = redact(url);
+      sendLog("info", ["WebSocket connecting: " + label]);
+      ws.addEventListener("open", () => sendLog("info", ["WebSocket open: " + label]));
+      ws.addEventListener("close", (e) => sendLog("warn", ["WebSocket closed: " + label + " (code " + e.code + (e.reason ? ", " + e.reason : "") + ")"]));
+      ws.addEventListener("error", () => sendLog("error", ["WebSocket error: " + label]));
+      return ws;
+    };
+    Wrapped.prototype = NativeWebSocket.prototype;
+    for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) Wrapped[k] = NativeWebSocket[k];
+    Wrapped.__inkwell = true;
+    g.WebSocket = Wrapped;
+  }
+
+  sendLog("info", ["Inkwell compatibility layer loaded"]);
+
   // ---------- chrome.sidePanel ----------
 
   const sidePanelPath = () => (manifest.side_panel && manifest.side_panel.default_path) || "";
@@ -717,6 +769,13 @@ final class ChromeCompat {
         let key = ObjectIdentifier(context)
 
         switch command {
+        case "log":
+            ExtensionLogStore.shared.add(extension: context.webExtension.displayName ?? "Extension",
+                                         level: args["level"] as? String ?? "log",
+                                         where: args["where"] as? String ?? "",
+                                         text: args["text"] as? String ?? "")
+            reply(success(nil))
+
         case "sidePanel.open":
             guard let url = panelURL(for: context), let window = WindowRegistry.shared.focusedOrAny else {
                 reply(failure("This extension has no side panel."))
@@ -879,5 +938,36 @@ final class AuthFlowViewController: UIViewController, WKNavigationDelegate, UIAd
         let done = completion
         completion = nil
         dismiss(animated: true) { done?(url) }
+    }
+}
+
+// MARK: - Extension Console
+
+struct ExtensionLogEntry: Identifiable {
+    let id = UUID()
+    let date: Date
+    let extensionName: String
+    let level: String
+    let location: String
+    let text: String
+}
+
+/// Recent console output from extensions, shown in Extensions → Extension Console.
+@MainActor
+final class ExtensionLogStore: ObservableObject {
+    static let shared = ExtensionLogStore()
+    @Published private(set) var entries: [ExtensionLogEntry] = []
+
+    func add(extension name: String, level: String, where location: String, text: String) {
+        entries.append(ExtensionLogEntry(date: Date(), extensionName: name, level: level, location: location, text: text))
+        if entries.count > 1000 { entries.removeFirst(entries.count - 1000) }
+    }
+
+    func clear() { entries.removeAll() }
+
+    var exportText: String {
+        entries.map { entry in
+            "[\(entry.date.formatted(date: .omitted, time: .standard))] \(entry.extensionName) \(entry.level.uppercased()) \(entry.location): \(entry.text)"
+        }.joined(separator: "\n")
     }
 }
