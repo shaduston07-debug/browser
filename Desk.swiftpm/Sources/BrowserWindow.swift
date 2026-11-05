@@ -78,10 +78,7 @@ final class BrowserWindow: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         WindowRegistry.shared.focus(self)
-        if !addressField.isFirstResponder { becomeFirstResponder() }
     }
-
-    override var canBecomeFirstResponder: Bool { true }
 
     func windowWillClose() {
         badgeTimer?.invalidate()
@@ -592,7 +589,8 @@ final class BrowserWindow: UIViewController {
         func command(_ title: String, _ input: String, _ flags: UIKeyModifierFlags, _ action: Selector,
                      _ plist: Any? = nil) -> UIKeyCommand {
             let c = UIKeyCommand(title: title, action: action, input: input, modifierFlags: flags, propertyList: plist)
-            c.wantsPriorityOverSystemBehavior = true
+            // Only ⌘/⌃ shortcuts may override the system; plain keys must always reach text fields.
+            c.wantsPriorityOverSystemBehavior = !flags.isEmpty
             return c
         }
         var list: [UIKeyCommand] = [

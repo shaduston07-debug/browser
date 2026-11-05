@@ -31,7 +31,9 @@ Desk makes an iPad (built for the M4 iPad Pro/Air) behave like a Mac browser:
 1. On the iPad, open this repository on GitHub in Safari and choose **Code → Download ZIP**.
 2. In the **Files** app, tap the ZIP to unpack it.
 3. Open **`Desk.swiftpm`** in **Swift Playgrounds**.
-4. Tap **▶︎ Run** to try it inside Playgrounds. To get a real home-screen app, tap the app settings and choose **Install on iPad** (you may need to be signed in with an Apple ID first).
+4. Tap **▶︎ Run**, then tap the expand button (↗↙) in the App Preview panel so the app fills the screen.
+
+Swift Playgrounds can't put an app on the home screen. To get a real home-screen app, either upload it to TestFlight from Playgrounds (this needs a paid Apple Developer account) or build it with Xcode on a Mac (see below; a free Apple ID works, but the app has to be re-signed every 7 days).
 
 ## Building with Xcode on a Mac
 
