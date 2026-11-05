@@ -36,6 +36,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             build 2>&1 | tee build.log | grep -E "error:|nearly matches|BUILD (SUCCEEDED|FAILED)" || true
           test -d build/Build/Products/Release-iphoneos/InkwellBrowser.app
 
@@ -61,5 +62,5 @@ jobs:
         run: |
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest InkwellBrowser.ipa \
-            --title "Inkwell Browser (latest build)" \
+            --title "Inkwell Browser (build ${{ github.run_number }})" \
             --notes "Unsigned build from ${GITHUB_SHA::7}. Sign and install it with SideStore, AltStore, Sideloadly or similar."

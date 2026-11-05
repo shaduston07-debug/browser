@@ -178,6 +178,7 @@ struct ExtensionConsoleView: View {
 
     var body: some View {
         List {
+            Text("Inkwell Browser build \(AppInfo.build)").font(.caption).foregroundStyle(.secondary)
             if store.entries.isEmpty {
                 Text("Nothing logged yet. Use an extension, then come back here.")
                     .foregroundStyle(.secondary)
@@ -233,5 +234,13 @@ struct ExtensionConsoleView: View {
         case "warn": return .orange
         default: return .secondary
         }
+    }
+}
+
+enum AppInfo {
+    static var build: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
     }
 }

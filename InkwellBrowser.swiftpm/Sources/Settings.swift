@@ -155,6 +155,10 @@ struct SettingsView: View {
                     Toggle("Show bookmarks bar", isOn: $showBookmarksBar)
                 }
 
+                Section("About") {
+                    LabeledContent("Version", value: AppInfo.build)
+                }
+
                 Section("Developer") {
                     Text("Every page and extension can be inspected from Safari on a Mac (Develop menu → this iPad) once Web Inspector is turned on in iPad Settings → Apps → Safari → Advanced.")
                         .font(.footnote)

@@ -600,6 +600,7 @@ enum ExtensionPatcher {
   try {
     runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg && msg.__inkwellKeepAlive === true) { sendResponse(true); return false; }
+      if (msg && msg.__inkwellLog === true) { sendLog(msg.level || "info", ["[" + (msg.source || "content") + "] " + msg.text]); return false; }
       if (!msg || msg.__inkwellExternal !== true) return false;
       const externalSender = { origin: msg.origin, url: msg.url, tab: sender && sender.tab, frameId: sender && sender.frameId };
       let responded = false;
@@ -759,12 +760,16 @@ enum ExtensionPatcher {
     if (resolve) { pending.delete(data.id); resolve(data.response); }
   });
 
+  window.postMessage({ __inkwellPageLog: true, extensionId: STORE_ID, text: "page shim active on " + location.origin }, "*");
+
   rt.sendMessage = function (extensionId, message, optionsOrCallback, maybeCallback) {
     if (extensionId !== STORE_ID) {
       if (typeof previousSend === "function") return previousSend.apply(this, arguments);
       return Promise.reject(new Error("Could not establish connection. Receiving end does not exist."));
     }
     const callback = [optionsOrCallback, maybeCallback].find((f) => typeof f === "function");
+    const type = message && typeof message === "object" ? message.type : typeof message;
+    window.postMessage({ __inkwellPageLog: true, extensionId: STORE_ID, text: "page called chrome.runtime.sendMessage, type=" + type }, "*");
     const id = STORE_ID + ":" + (++counter) + ":" + Math.random();
     return new Promise((resolve) => {
       pending.set(id, (response) => { resolve(response); if (callback) callback(response); });
@@ -789,19 +794,61 @@ enum ExtensionPatcher {
     (document.head || document.documentElement).appendChild(script);
   } catch (e) { /* ignore */ }
 
+  const log = (text, level) => {
+    try {
+      const r = api.runtime.sendMessage({ __inkwellLog: true, source: "bridge " + location.host, level: level || "info", text });
+      if (r && typeof r.catch === "function") r.catch(() => {});
+    } catch (e) { /* ignore */ }
+  };
+  log("bridge loaded on " + location.href.split("?")[0]);
+
   window.addEventListener("message", (event) => {
     const data = event.data;
+    if (event.source === window && data && data.__inkwellPageLog === true && data.extensionId === STORE_ID) {
+      log(String(data.text));
+      return;
+    }
     if (event.source !== window || !data || data.__inkwellExternal !== true || data.extensionId !== STORE_ID) return;
-    const reply = (response) => window.postMessage({ __inkwellReply: true, extensionId: STORE_ID, id: data.id, response }, "*");
+    log("relaying message type=" + (data.message && data.message.type));
+    const reply = (response) => {
+      log("extension replied: " + String(JSON.stringify(response)).slice(0, 300));
+      window.postMessage({ __inkwellReply: true, extensionId: STORE_ID, id: data.id, response }, "*");
+    };
     try {
       const result = api.runtime.sendMessage({ __inkwellExternal: true, origin: location.origin, url: location.href, message: data.message });
-      if (result && typeof result.then === "function") result.then(reply, () => reply(undefined));
+      if (result && typeof result.then === "function") {
+        result.then(reply, (e) => { log("relay failed: " + (e && e.message), "error"); reply(undefined); });
+      }
     } catch (e) {
       reply(undefined);
     }
   });
 })();
 """#
+}
+
+extension ExtensionPatcher {
+    /// Page-world scripts that let websites in an extension's "externally_connectable" call
+    /// chrome.runtime.sendMessage(<Chrome ID>). Injected by the app itself so site CSP can't block them.
+    @MainActor
+    static func pageWorldUserScripts() -> [WKUserScript] {
+        ExtensionManager.shared.activeContexts.compactMap { record, context in
+            guard let storeID = record.storeID, ChromeWebStore.isExtensionID(storeID),
+                  let connectable = context.webExtension.manifest["externally_connectable"] as? [String: Any],
+                  let matches = connectable["matches"] as? [String], !matches.isEmpty,
+                  let matchesJSON = (try? JSONSerialization.data(withJSONObject: matches)).flatMap({ String(data: $0, encoding: .utf8) })
+            else { return nil }
+            let guardJS = """
+            (() => {
+              const patterns = \(matchesJSON);
+              const toRegex = (p) => new RegExp("^" + p.split("*").map((s) => s.replace(/[.+?^${}()|[\\]\\\\\\/]/g, "\\\\$&")).join(".*") + "$");
+              if (!patterns.some((p) => { try { return toRegex(p).test(location.href); } catch (e) { return false; } })) return;
+
+            """
+            let source = guardJS + pageShimScript.replacingOccurrences(of: "__STORE_ID__", with: storeID) + "\n})();\n"
+            return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        }
+    }
 }
 
 // MARK: - Native side of the compatibility layer
@@ -871,6 +918,10 @@ final class ChromeCompat {
         let args = body["args"] as? [String: Any] ?? [:]
         let key = ObjectIdentifier(context)
 
+        if command != "log" {
+            ExtensionLogStore.shared.add(extension: "Inkwell", level: "info", where: "app",
+                                         text: "\(context.webExtension.displayName ?? "Extension") asked the app for \(command)")
+        }
         switch command {
         case "log":
             ExtensionLogStore.shared.add(extension: context.webExtension.displayName ?? "Extension",

@@ -76,6 +76,10 @@ final class BrowserTab: NSObject {
         config.preferences.isTextInteractionEnabled = true
         config.dataDetectorTypes = []
 
+        for script in ExtensionPatcher.pageWorldUserScripts() {
+            config.userContentController.addUserScript(script)
+        }
+
         if AppSettings.hideTouch {
             // Desktop sites often check maxTouchPoints to spot iPads; report a pointer-only device.
             let source = """

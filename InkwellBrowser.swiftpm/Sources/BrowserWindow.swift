@@ -1015,7 +1015,11 @@ extension BrowserWindow: WKNavigationDelegate {
         // chrome-extension://<Chrome Web Store ID>/… → the same file in the installed extension.
         if let url = navigationAction.request.url, url.scheme == "chrome-extension" {
             decisionHandler(.cancel, preferences)
-            if let mapped = ExtensionManager.shared.localURL(forChromeExtensionURL: url, from: webView.url) {
+            let mapped = ExtensionManager.shared.localURL(forChromeExtensionURL: url, from: webView.url)
+            ExtensionLogStore.shared.add(extension: "Inkwell", level: mapped == nil ? "warn" : "info", where: "app",
+                                         text: "Tab navigated to \(url.scheme ?? "")://\(url.host ?? "")\(url.path) → "
+                                            + (mapped.map { "opened \($0.path)" } ?? "no installed extension matches"))
+            if let mapped {
                 webView.load(URLRequest(url: mapped))
             }
             return
