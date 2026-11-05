@@ -561,6 +561,8 @@ final class BrowserWindow: UIViewController {
         let tab = activeTab
         return [
             UIMenu(options: .displayInline, children: [
+                UIAction(title: "Paste and Go", image: UIImage(systemName: "doc.on.clipboard"),
+                         attributes: UIPasteboard.general.hasStrings ? [] : .disabled) { [weak self] _ in self?.pasteAndGo() },
                 UIAction(title: "New Tab", image: UIImage(systemName: "plus.square")) { [weak self] _ in self?.openTab(url: nil) },
                 UIAction(title: "New Window", image: UIImage(systemName: "macwindow.badge.plus")) { [weak self] _ in self?.newWindow() },
                 UIAction(title: "Reopen Closed Tab", image: UIImage(systemName: "arrow.uturn.backward"),
@@ -752,6 +754,14 @@ final class BrowserWindow: UIViewController {
         activeTab?.webView.becomeFirstResponder()
     }
 
+    /// Opens whatever is on the clipboard (a URL or search text). Also a workaround when no keyboard is available.
+    func pasteAndGo() {
+        guard let text = UIPasteboard.general.string, let url = AppSettings.url(fromInput: text) else { return }
+        suggestionsView.hide()
+        addressField.resignFirstResponder()
+        navigate(to: url)
+    }
+
     @objc private func cmdHistory() { showHistory() }
     @objc private func cmdSuggestionDown() { suggestionsView.moveHighlight(by: 1) }
     @objc private func cmdSuggestionUp() { suggestionsView.moveHighlight(by: -1) }
@@ -766,6 +776,16 @@ final class BrowserWindow: UIViewController {
 extension BrowserWindow: UITextFieldDelegate {
     func textFieldDidBeginEditing(_ textField: UITextField) {
         DispatchQueue.main.async { textField.selectAll(nil) }
+    }
+
+    /// Adds "Paste and Go" to the address bar's Paste menu, like Safari.
+    func textField(_ textField: UITextField, editMenuForCharactersIn range: NSRange,
+                   suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard UIPasteboard.general.hasStrings else { return UIMenu(children: suggestedActions) }
+        let pasteAndGo = UIAction(title: "Paste and Go", image: UIImage(systemName: "arrow.right.circle")) { [weak self] _ in
+            self?.pasteAndGo()
+        }
+        return UIMenu(children: [pasteAndGo] + suggestedActions)
     }
 
     func textFieldDidEndEditing(_ textField: UITextField) {
