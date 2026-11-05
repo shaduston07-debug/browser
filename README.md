@@ -1,4 +1,4 @@
-# Inkwell — a desktop-class browser for iPad
+# Inkwell Browser — a desktop-class browser for iPad
 
 Inkwell makes an iPad (built for the M4 iPad Pro/Air) behave like a Mac browser:
 

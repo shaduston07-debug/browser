@@ -14,7 +14,7 @@ let package = Package(
     ],
     products: [
         .iOSApplication(
-            name: "Inkwell",
+            name: "Inkwell Browser",
             targets: ["AppModule"],
             bundleIdentifier: "com.mangashaduston.inkwellbrowser",
             displayVersion: "1.0",

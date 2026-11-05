@@ -258,7 +258,7 @@ struct StartPageView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                Text("Inkwell")
+                Text("Inkwell Browser")
                     .font(.system(size: 40, weight: .bold, design: .serif))
                     .frame(maxWidth: .infinity)
                     .padding(.top, 40)
