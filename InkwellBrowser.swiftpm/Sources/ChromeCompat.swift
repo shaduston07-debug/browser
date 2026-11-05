@@ -14,6 +14,8 @@ enum ExtensionPatcher {
     static let keepAlivePageName = "__inkwell_keepalive.html"
     static let backgroundPageName = "__inkwell_background.html"
     static let workerShimName = "__inkwell_worker_shim.js"
+    static let redirectPageName = "__inkwell_redirect.html"
+    static let redirectScriptName = "__inkwell_redirect.js"
     static let keepAliveScriptName = "__inkwell_keepalive.js"
 
     static func patch(_ root: URL, storeID: String?) {
@@ -34,6 +36,13 @@ enum ExtensionPatcher {
         try? keepAliveHTML.write(to: root.appendingPathComponent(keepAlivePageName), atomically: true, encoding: .utf8)
         try? keepAliveScript.write(to: root.appendingPathComponent(keepAliveScriptName), atomically: true, encoding: .utf8)
         try? workerShimScript.write(to: root.appendingPathComponent(workerShimName), atomically: true, encoding: .utf8)
+        let redirectHTML = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Signing in…</title>"
+            + "<script src=\"/\(compatFileName)\"></script><script src=\"/\(redirectScriptName)\" defer></script>"
+            + "<style>body{font:17px -apple-system,sans-serif;color:#888;display:flex;align-items:center;"
+            + "justify-content:center;height:90vh;margin:0}@media(prefers-color-scheme:dark){body{background:#1c1c1e}}</style>"
+            + "</head><body><p id=\"status\">Finishing sign-in…</p></body></html>"
+        try? redirectHTML.write(to: root.appendingPathComponent(redirectPageName), atomically: true, encoding: .utf8)
+        try? redirectScript.write(to: root.appendingPathComponent(redirectScriptName), atomically: true, encoding: .utf8)
 
         var changed = false
 
@@ -675,6 +684,43 @@ enum ExtensionPatcher {
       } catch (e) { /* ignore */ }
     }
   });
+})();
+"""#
+
+    static let redirectScript = #"""
+// Inkwell Browser — finishes a sign-in that redirected to chrome-extension://<id>/…, which only
+// Chrome can open. Hands the redirect to the extension the way Chrome-based sites do.
+(async () => {
+  const api = globalThis.browser || globalThis.chrome;
+  const params = new URLSearchParams(location.search);
+  const target = params.get("u") || "";
+  const origin = params.get("origin") || "";
+  const status = document.getElementById("status");
+  const show = (text) => { if (status) status.textContent = text; };
+  console.info("Inkwell: delivering redirect to extension", target.split("?")[0], "from", origin);
+  try {
+    const response = await api.runtime.sendMessage({
+      __inkwellExternal: true,
+      origin,
+      url: params.get("from") || origin,
+      message: { type: "oauth_redirect", redirect_uri: target },
+    });
+    console.info("Inkwell: extension replied", JSON.stringify(response));
+    if (response && response.success === false) {
+      show("Sign-in didn't finish: " + (response.error || "unknown error"));
+      return;
+    }
+    show("Signed in. You can close this tab.");
+    setTimeout(async () => {
+      try {
+        const tab = await api.tabs.getCurrent();
+        if (tab && tab.id != null) await api.tabs.remove(tab.id);
+      } catch (e) { window.close(); }
+    }, 1200);
+  } catch (e) {
+    console.error("Inkwell: redirect delivery failed", e);
+    show("Sign-in didn't finish: " + (e && e.message ? e.message : e));
+  }
 })();
 """#
 

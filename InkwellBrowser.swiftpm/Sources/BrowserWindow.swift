@@ -1015,7 +1015,7 @@ extension BrowserWindow: WKNavigationDelegate {
         // chrome-extension://<Chrome Web Store ID>/… → the same file in the installed extension.
         if let url = navigationAction.request.url, url.scheme == "chrome-extension" {
             decisionHandler(.cancel, preferences)
-            if let mapped = ExtensionManager.shared.localURL(forChromeExtensionURL: url) {
+            if let mapped = ExtensionManager.shared.localURL(forChromeExtensionURL: url, from: webView.url) {
                 webView.load(URLRequest(url: mapped))
             }
             return

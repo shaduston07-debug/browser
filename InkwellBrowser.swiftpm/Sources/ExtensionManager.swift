@@ -171,18 +171,35 @@ final class ExtensionManager: NSObject, ObservableObject {
         revision += 1
     }
 
-    /// Maps chrome-extension://<Chrome Web Store ID>/path?query onto the installed copy, if that file exists.
-    func localURL(forChromeExtensionURL url: URL) -> URL? {
+    /// Maps chrome-extension://<Chrome Web Store ID>/path?query onto the installed copy. If the file
+    /// doesn't exist (an OAuth callback that only Chrome can open), it goes to Inkwell's redirect page,
+    /// which hands the URL to the extension like a Chrome-connected website would.
+    func localURL(forChromeExtensionURL url: URL, from page: URL?) -> URL? {
         guard let host = url.host,
               let record = records.first(where: { $0.storeID == host }),
               let context = contexts[record.id] else { return nil }
         let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
-        guard !path.isEmpty,
-              FileManager.default.fileExists(atPath: folder(for: record).appendingPathComponent(path).path),
-              var components = URLComponents(url: context.baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
-        else { return nil }
-        components.query = url.query
-        components.fragment = url.fragment
+        let fileExists = !path.isEmpty
+            && FileManager.default.fileExists(atPath: folder(for: record).appendingPathComponent(path).path)
+
+        if fileExists, var components = URLComponents(url: context.baseURL.appendingPathComponent(path),
+                                                      resolvingAgainstBaseURL: false) {
+            components.query = url.query
+            components.fragment = url.fragment
+            return components.url
+        }
+
+        guard var components = URLComponents(url: context.baseURL.appendingPathComponent(ExtensionPatcher.redirectPageName),
+                                             resolvingAgainstBaseURL: false) else { return nil }
+        var origin = ""
+        if let page, let scheme = page.scheme, let pageHost = page.host {
+            origin = "\(scheme)://\(pageHost)" + (page.port.map { ":\($0)" } ?? "")
+        }
+        components.queryItems = [
+            URLQueryItem(name: "u", value: url.absoluteString),
+            URLQueryItem(name: "origin", value: origin),
+            URLQueryItem(name: "from", value: page?.absoluteString ?? ""),
+        ]
         return components.url
     }
 
