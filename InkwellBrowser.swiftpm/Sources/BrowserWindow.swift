@@ -1006,6 +1006,14 @@ extension BrowserWindow: WKNavigationDelegate {
             decisionHandler(.cancel, preferences)
             return
         }
+        // chrome-extension://<Chrome Web Store ID>/… → the same file in the installed extension.
+        if let url = navigationAction.request.url, url.scheme == "chrome-extension" {
+            decisionHandler(.cancel, preferences)
+            if let mapped = ExtensionManager.shared.localURL(forChromeExtensionURL: url) {
+                webView.load(URLRequest(url: mapped))
+            }
+            return
+        }
         if let url = navigationAction.request.url, ["crx", "xpi"].contains(url.pathExtension.lowercased()) {
             decisionHandler(.download, preferences)
             return

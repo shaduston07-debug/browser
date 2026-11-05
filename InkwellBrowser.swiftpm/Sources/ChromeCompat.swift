@@ -9,6 +9,8 @@ import WebKit
 enum ExtensionPatcher {
     static let compatFileName = "__inkwell_compat.js"
     static let workerWrapperName = "__inkwell_sw.js"
+    static let pageShimFileName = "__inkwell_page.js"
+    static let bridgeFileName = "__inkwell_bridge.js"
 
     static func patch(_ root: URL, storeID: String?) {
         let fm = FileManager.default
@@ -51,12 +53,35 @@ enum ExtensionPatcher {
             manifest["background"] = background
         }
 
+        // 4. Websites in "externally_connectable" get chrome.runtime.sendMessage(<Chrome ID>) support.
+        if let storeID, ChromeWebStore.isExtensionID(storeID),
+           let connectable = manifest["externally_connectable"] as? [String: Any],
+           let matches = connectable["matches"] as? [String], !matches.isEmpty {
+            try? pageShimScript.replacingOccurrences(of: "__STORE_ID__", with: storeID)
+                .write(to: root.appendingPathComponent(pageShimFileName), atomically: true, encoding: .utf8)
+            try? bridgeScript.replacingOccurrences(of: "__STORE_ID__", with: storeID)
+                .write(to: root.appendingPathComponent(bridgeFileName), atomically: true, encoding: .utf8)
+
+            var contentScripts = manifest["content_scripts"] as? [[String: Any]] ?? []
+            let alreadyAdded = contentScripts.contains { ($0["js"] as? [String])?.contains(bridgeFileName) == true }
+            if !alreadyAdded {
+                contentScripts.insert(["matches": matches, "js": [pageShimFileName], "run_at": "document_start", "world": "MAIN"], at: 0)
+                contentScripts.insert(["matches": matches, "js": [bridgeFileName], "run_at": "document_start"], at: 1)
+                manifest["content_scripts"] = contentScripts
+
+                var resources = manifest["web_accessible_resources"] as? [Any] ?? []
+                resources.append(["resources": [pageShimFileName], "matches": matches])
+                manifest["web_accessible_resources"] = resources
+                changed = true
+            }
+        }
+
         if changed, let out = try? JSONSerialization.data(withJSONObject: manifest,
                                                          options: [.prettyPrinted, .withoutEscapingSlashes]) {
             try? out.write(to: manifestURL, options: .atomic)
         }
 
-        // 4. Every extension page (popup, options, side panel, background page…).
+        // 5. Every extension page (popup, options, side panel, background page…).
         let tag = "<script src=\"/\(compatFileName)\"></script>"
         guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return }
         for case let file as URL in enumerator where ["html", "htm"].contains(file.pathExtension.lowercased()) {
@@ -468,6 +493,56 @@ enum ExtensionPatcher {
     onSignInChanged: makeEvent(),
   };
 
+  // ---------- runtime.onMessageExternal bridge ----------
+  // Websites listed in "externally_connectable" talk to Chrome extensions with
+  // chrome.runtime.sendMessage(<Chrome extension ID>, …). Inkwell's page shim forwards those
+  // messages here through a content script; we hand them to the extension's
+  // onMessageExternal listeners with the website as the sender, like Chrome does.
+
+  const externalListeners = new Set();
+  const runtime = chromeAPI.runtime;
+  const nativeExternal = runtime.onMessageExternal;
+  const externalEvent = {
+    addListener: (f) => {
+      externalListeners.add(f);
+      try { if (nativeExternal && nativeExternal !== externalEvent) nativeExternal.addListener(f); } catch (e) { /* unsupported */ }
+    },
+    removeListener: (f) => {
+      externalListeners.delete(f);
+      try { if (nativeExternal && nativeExternal !== externalEvent) nativeExternal.removeListener(f); } catch (e) { /* unsupported */ }
+    },
+    hasListener: (f) => externalListeners.has(f),
+    hasListeners: () => externalListeners.size > 0,
+  };
+  for (const ns of namespaces) {
+    if (!ns.runtime) continue;
+    try { Object.defineProperty(ns.runtime, "onMessageExternal", { value: externalEvent, configurable: true, writable: true }); }
+    catch (e) { try { ns.runtime.onMessageExternal = externalEvent; } catch (e2) { /* read-only */ } }
+  }
+
+  try {
+    runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg || msg.__inkwellExternal !== true) return false;
+      const externalSender = { origin: msg.origin, url: msg.url, tab: sender && sender.tab, frameId: sender && sender.frameId };
+      let responded = false;
+      let async = false;
+      const respond = (response) => {
+        if (responded) return;
+        responded = true;
+        try { sendResponse(response); } catch (e) { /* channel closed */ }
+      };
+      for (const listener of externalListeners) {
+        try {
+          const result = listener(msg.message, externalSender, respond);
+          if (result === true) async = true;
+          else if (result && typeof result.then === "function") { async = true; result.then(respond, () => respond(undefined)); }
+        } catch (e) { console.error(e); }
+      }
+      if (!async) respond(undefined);
+      return async;
+    });
+  } catch (e) { /* no runtime.onMessage in this context */ }
+
   // ---------- install ----------
 
   for (const ns of namespaces) {
@@ -482,6 +557,70 @@ enum ExtensionPatcher {
       define(ns.tabs, "ungroup", tabsUngroup);
     }
   }
+})();
+"""#
+
+    static let pageShimScript = #"""
+// Inkwell Browser — lets this website call chrome.runtime.sendMessage("__STORE_ID__", …) like in Chrome.
+(() => {
+  const STORE_ID = "__STORE_ID__";
+  const flag = "__inkwellShim_" + STORE_ID;
+  if (window[flag]) return;
+  window[flag] = true;
+  window.chrome = window.chrome || {};
+  const rt = window.chrome.runtime = window.chrome.runtime || {};
+  const previousSend = rt.sendMessage;
+  const pending = new Map();
+  let counter = 0;
+
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (event.source !== window || !data || data.__inkwellReply !== true || data.extensionId !== STORE_ID) return;
+    const resolve = pending.get(data.id);
+    if (resolve) { pending.delete(data.id); resolve(data.response); }
+  });
+
+  rt.sendMessage = function (extensionId, message, optionsOrCallback, maybeCallback) {
+    if (extensionId !== STORE_ID) {
+      if (typeof previousSend === "function") return previousSend.apply(this, arguments);
+      return Promise.reject(new Error("Could not establish connection. Receiving end does not exist."));
+    }
+    const callback = [optionsOrCallback, maybeCallback].find((f) => typeof f === "function");
+    const id = STORE_ID + ":" + (++counter) + ":" + Math.random();
+    return new Promise((resolve) => {
+      pending.set(id, (response) => { resolve(response); if (callback) callback(response); });
+      window.postMessage({ __inkwellExternal: true, extensionId: STORE_ID, id, message }, "*");
+    });
+  };
+})();
+"""#
+
+    static let bridgeScript = #"""
+// Inkwell Browser — relays chrome.runtime.sendMessage calls from this website to the extension.
+(() => {
+  const STORE_ID = "__STORE_ID__";
+  const api = globalThis.browser || globalThis.chrome;
+  if (!api || !api.runtime) return;
+
+  // Load the page-world shim (in case the browser ignores "world": "MAIN").
+  try {
+    const script = document.createElement("script");
+    script.src = api.runtime.getURL("__inkwell_page.js");
+    script.onload = () => script.remove();
+    (document.head || document.documentElement).appendChild(script);
+  } catch (e) { /* ignore */ }
+
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (event.source !== window || !data || data.__inkwellExternal !== true || data.extensionId !== STORE_ID) return;
+    const reply = (response) => window.postMessage({ __inkwellReply: true, extensionId: STORE_ID, id: data.id, response }, "*");
+    try {
+      const result = api.runtime.sendMessage({ __inkwellExternal: true, origin: location.origin, url: location.href, message: data.message });
+      if (result && typeof result.then === "function") result.then(reply, () => reply(undefined));
+    } catch (e) {
+      reply(undefined);
+    }
+  });
 })();
 """#
 }

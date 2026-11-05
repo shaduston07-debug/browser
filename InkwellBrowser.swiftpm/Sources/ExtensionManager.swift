@@ -170,6 +170,21 @@ final class ExtensionManager: NSObject, ObservableObject {
         revision += 1
     }
 
+    /// Maps chrome-extension://<Chrome Web Store ID>/path?query onto the installed copy, if that file exists.
+    func localURL(forChromeExtensionURL url: URL) -> URL? {
+        guard let host = url.host,
+              let record = records.first(where: { $0.storeID == host }),
+              let context = contexts[record.id] else { return nil }
+        let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+        guard !path.isEmpty,
+              FileManager.default.fileExists(atPath: folder(for: record).appendingPathComponent(path).path),
+              var components = URLComponents(url: context.baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.query = url.query
+        components.fragment = url.fragment
+        return components.url
+    }
+
     func openOptions(for id: UUID) {
         guard let context = contexts[id], let url = context.optionsPageURL else { return }
         WindowRegistry.shared.focusedOrAny?.openTab(url: url, select: true)
