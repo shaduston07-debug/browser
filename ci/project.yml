@@ -1,0 +1,49 @@
+# XcodeGen spec used by CI to build an .ipa from the same sources as InkwellBrowser.swiftpm.
+name: InkwellBrowser
+options:
+  deploymentTarget:
+    iOS: "18.4"
+  createIntermediateGroups: true
+targets:
+  InkwellBrowser:
+    type: application
+    platform: iOS
+    sources:
+      - path: ../InkwellBrowser.swiftpm/Sources
+      - path: Assets.xcassets
+    settings:
+      base:
+        PRODUCT_NAME: InkwellBrowser
+        PRODUCT_BUNDLE_IDENTIFIER: com.mangashaduston.inkwellbrowser
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Inkwell Browser
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UIApplicationSupportsIndirectInputEvents: true
+        # Show the app's Documents folder (Downloads) in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight

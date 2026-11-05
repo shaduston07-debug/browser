@@ -4,3 +4,8 @@
 xcuserdata/
 *.xcuserstate
 InkwellBrowser.zip
+ci/InkwellBrowser.xcodeproj/
+ci/Info.plist
+build/
+Payload/
+*.ipa
