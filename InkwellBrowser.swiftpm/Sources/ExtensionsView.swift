@@ -73,7 +73,7 @@ struct ExtensionsView: View {
                 } header: {
                     Text("Get extensions")
                 } footer: {
-                    Text("Extensions run on WebKit's Web Extensions engine (the same one Safari uses), so most Chrome and Firefox extensions work unchanged — content scripts, popups, background service workers, storage, tabs, context menus and declarativeNetRequest ad-blocking. APIs Apple doesn't support (e.g. blocking webRequest, debugger, native messaging) won't work. Tip: for ad-blocking use uBlock Origin Lite.")
+                    Text("Extensions run on WebKit's Web Extensions engine (the same one Safari uses), plus Inkwell's Chrome compatibility layer, which adds side panels, page control (chrome.debugger), offscreen documents, sign-in flows and website-to-extension messaging. Blocking webRequest isn't available, so for ad-blocking use uBlock Origin Lite. If an extension misbehaves, check the Extension Console.")
                 }
             }
             .navigationTitle("Extensions")

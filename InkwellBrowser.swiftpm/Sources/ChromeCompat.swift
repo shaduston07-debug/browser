@@ -12,6 +12,8 @@ enum ExtensionPatcher {
     static let pageShimFileName = "__inkwell_page.js"
     static let bridgeFileName = "__inkwell_bridge.js"
     static let keepAlivePageName = "__inkwell_keepalive.html"
+    static let backgroundPageName = "__inkwell_background.html"
+    static let workerShimName = "__inkwell_worker_shim.js"
     static let keepAliveScriptName = "__inkwell_keepalive.js"
 
     static func patch(_ root: URL, storeID: String?) {
@@ -31,6 +33,7 @@ enum ExtensionPatcher {
             + "<script src=\"/\(keepAliveScriptName)\"></script></head><body></body></html>"
         try? keepAliveHTML.write(to: root.appendingPathComponent(keepAlivePageName), atomically: true, encoding: .utf8)
         try? keepAliveScript.write(to: root.appendingPathComponent(keepAliveScriptName), atomically: true, encoding: .utf8)
+        try? workerShimScript.write(to: root.appendingPathComponent(workerShimName), atomically: true, encoding: .utf8)
 
         var changed = false
 
@@ -44,13 +47,18 @@ enum ExtensionPatcher {
 
         // 3. Load the layer before the background code.
         if var background = manifest["background"] as? [String: Any] {
-            if let worker = background["service_worker"] as? String, worker != workerWrapperName {
+            // iPad apps can't run service workers (WebKit needs an Apple-only entitlement for that),
+            // so a Chrome "service_worker" background runs as a background page instead.
+            if let worker = background["service_worker"] as? String {
                 let isModule = (background["type"] as? String) == "module"
-                let wrapper = isModule
-                    ? "import \"./\(compatFileName)\";\nimport \"./\(worker)\";\n"
-                    : "importScripts(\"\(compatFileName)\", \"\(worker)\");\n"
-                try? wrapper.write(to: root.appendingPathComponent(workerWrapperName), atomically: true, encoding: .utf8)
-                background["service_worker"] = workerWrapperName
+                let scriptType = isModule ? "module" : "text/javascript"
+                let page = "<!doctype html><html><head><meta charset=\"utf-8\">"
+                    + "<script src=\"/\(compatFileName)\"></script>"
+                    + "<script src=\"/\(workerShimName)\"></script>"
+                    + "<script type=\"\(scriptType)\" src=\"/\(worker)\"></script>"
+                    + "</head><body></body></html>"
+                try? page.write(to: root.appendingPathComponent(backgroundPageName), atomically: true, encoding: .utf8)
+                background = ["page": backgroundPageName, "persistent": false]
                 changed = true
             }
             if var scripts = background["scripts"] as? [String], scripts.first != compatFileName {
@@ -618,6 +626,55 @@ enum ExtensionPatcher {
       define(ns.tabs, "ungroup", tabsUngroup);
     }
   }
+})();
+"""#
+
+    static let workerShimScript = #"""
+// Inkwell Browser — runs a Chrome "service worker" background inside a background page.
+// Third-party iPad apps can't use service workers, so this fills in the worker-only globals.
+(() => {
+  const g = globalThis;
+  const api = g.browser || g.chrome;
+  if (!("ServiceWorkerGlobalScope" in g)) {
+    g.ServiceWorkerGlobalScope = function ServiceWorkerGlobalScope() {};
+  }
+  if (typeof g.importScripts !== "function") {
+    g.importScripts = (...urls) => {
+      for (const u of urls) document.write('<script src="' + new URL(u, location.href).href + '"><\/script>');
+    };
+  }
+  if (!g.registration) {
+    g.registration = {
+      scope: location.origin + "/",
+      active: null, installing: null, waiting: null,
+      update: async () => undefined,
+      unregister: async () => true,
+      showNotification: async (title, options) => {
+        try { await api.notifications.create({ type: "basic", title, message: (options && options.body) || "", iconUrl: (options && options.icon) || "" }); } catch (e) { /* ignore */ }
+      },
+      getNotifications: async () => [],
+    };
+  }
+  if (!g.clients) {
+    g.clients = {
+      claim: async () => undefined,
+      matchAll: async () => [],
+      get: async () => undefined,
+      openWindow: async (url) => { await api.tabs.create({ url }); return null; },
+    };
+  }
+  if (typeof g.skipWaiting !== "function") g.skipWaiting = async () => undefined;
+
+  // Fire the worker lifecycle events once the background code (modules run deferred) has loaded.
+  g.addEventListener("load", () => {
+    for (const type of ["install", "activate"]) {
+      try {
+        const event = new Event(type);
+        event.waitUntil = () => undefined;
+        g.dispatchEvent(event);
+      } catch (e) { /* ignore */ }
+    }
+  });
 })();
 """#
 
