@@ -28,6 +28,18 @@ Inkwell makes an iPad (built for the M4 iPad Pro/Air) behave like a Mac browser:
 - iPadOS **18.4 or later** (this is when Apple added the extension API). iPadOS 26 is recommended.
 - **Swift Playgrounds** (free, App Store) on the iPad, **or** Xcode 16.3+ on a Mac.
 
+## Download the IPA
+
+Every push to `main` is built on GitHub's Mac runners. The newest unsigned build is published as **InkwellBrowser.ipa** on the [latest release](../../releases/tag/latest).
+
+iPadOS only installs apps signed for your device, so you need to sign the IPA when you install it. Use one of these:
+
+- **SideStore**: installs and refreshes apps on the iPad itself, using a free Apple ID. Setup needs a computer once, to make a pairing file.
+- **AltStore** or **Sideloadly**: installs from a Mac or PC using a free Apple ID.
+- **A paid Apple Developer account**: signed apps last a year, and you can use TestFlight.
+
+With a free Apple ID, the app has to be re-signed every 7 days. SideStore can do this on the iPad by itself.
+
 ## Building and running on the iPad (no Mac needed)
 
 1. On the iPad, open this repository on GitHub in Safari and choose **Code → Download ZIP**.
