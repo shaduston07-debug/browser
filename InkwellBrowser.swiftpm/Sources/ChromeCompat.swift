@@ -943,9 +943,22 @@ enum ExtensionPatcher {
       if (owned) { popupTabs.delete(windowId); try { await promiseAPI.tabs.remove(owned); } catch (e) { /* closed */ } }
     }),
   };
+  // Is this page the extension's side panel (Inkwell shows it in its own panel, not in a tab)?
+  const isSidePanelPage = (() => {
+    try {
+      const path = (manifest.side_panel && manifest.side_panel.default_path) || "";
+      return !!path && !!g.location && g.location.pathname === "/" + path.replace(/^\//, "").split("?")[0];
+    } catch (e) { return false; }
+  })();
+
   const getContexts = wrap(async (filter) => {
     const types = (filter && filter.contextTypes) || null;
+    const urls = (filter && filter.documentUrls) || null;
     const out = [];
+    if (isSidePanelPage && (!types || types.includes("SIDE_PANEL")) && (!urls || urls.includes(g.location.href))) {
+      out.push({ contextType: "SIDE_PANEL", contextId: "side-panel", documentUrl: g.location.href,
+        documentOrigin: g.location.origin, frameId: 0, incognito: false, tabId: -1, windowId: -1 });
+    }
     if (!types || types.includes("OFFSCREEN_DOCUMENT")) {
       try { if (await native("offscreen.has", {})) out.push({ contextType: "OFFSCREEN_DOCUMENT", contextId: "offscreen", documentUrl: "", frameId: -1, incognito: false, tabId: -1, windowId: -1 }); } catch (e) { /* none */ }
     }
@@ -965,6 +978,12 @@ enum ExtensionPatcher {
       define(ns.runtime, "getContexts", getContexts);
       define(ns.runtime, "ContextType", { TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL", DEVELOPER_TOOLS: "DEVELOPER_TOOLS" });
       define(ns.runtime, "OnInstalledReason", { INSTALL: "install", UPDATE: "update", CHROME_UPDATE: "chrome_update", SHARED_MODULE_UPDATE: "shared_module_update" });
+    }
+    // Like Chrome: a side panel isn't a tab, so tabs.getCurrent() resolves to undefined there.
+    if (isSidePanelPage && ns.tabs) {
+      const sidePanelGetCurrent = wrap(async () => undefined);
+      try { Object.defineProperty(ns.tabs, "getCurrent", { value: sidePanelGetCurrent, configurable: true, writable: true }); }
+      catch (e) { try { ns.tabs.getCurrent = sidePanelGetCurrent; } catch (e2) { sendLog("warn", ["Couldn't override tabs.getCurrent in the side panel"]); } }
     }
     if (ns.storage) define(ns.storage, "managed", { get: wrap(async () => ({})), getBytesInUse: wrap(async () => 0), onChanged: makeEvent() });
     define(ns, "downloads", downloads);
