@@ -353,6 +353,8 @@ final class BrowserWindow: UIViewController {
         ])
 
         ExtensionManager.shared.controller.didActivateTab(tab, previousActiveTab: previous)
+        // Give the page keyboard/pointer focus so the first click on it works (not just focuses it).
+        if !tab.isBlank, !addressField.isFirstResponder { webView.becomeFirstResponder() }
         updateToolbar()
         reloadTabStrip()
         refreshExtensionButtons()
@@ -1104,7 +1106,10 @@ extension BrowserWindow: WKNavigationDelegate {
                 FaviconStore.shared.load(pageURL: pageURL, declaredIcon: declared)
             }
         }
-        if let tab = tab(for: webView), tab === activeTab { updateToolbar() }
+        if let tab = tab(for: webView), tab === activeTab {
+            updateToolbar()
+            if !addressField.isFirstResponder, presentedViewController == nil { webView.becomeFirstResponder() }
+        }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

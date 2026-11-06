@@ -631,8 +631,42 @@ enum ExtensionPatcher {
   };
   for (const ns of namespaces) {
     if (!ns.runtime) continue;
+    const nativeEvent = ns.runtime.onMessageExternal;
     try { Object.defineProperty(ns.runtime, "onMessageExternal", { value: externalEvent, configurable: true, writable: true }); }
     catch (e) { try { ns.runtime.onMessageExternal = externalEvent; } catch (e2) { /* read-only */ } }
+    if (ns.runtime.onMessageExternal === externalEvent || !nativeEvent) continue;
+
+    // WebKit wouldn't let us replace the event, so record listeners as they're added to it instead:
+    // first on the event object itself, then (if that's locked too) on its shared prototype.
+    const record = (original) => function (listener) {
+      if (this === nativeEvent && typeof listener === "function") externalListeners.add(listener);
+      return original.apply(this, arguments);
+    };
+    const unrecord = (original) => function (listener) {
+      if (this === nativeEvent) externalListeners.delete(listener);
+      return original.apply(this, arguments);
+    };
+    let hooked = false;
+    try {
+      const add = nativeEvent.addListener;
+      const remove = nativeEvent.removeListener;
+      Object.defineProperty(nativeEvent, "addListener", { value: record(add), configurable: true, writable: true });
+      if (remove) Object.defineProperty(nativeEvent, "removeListener", { value: unrecord(remove), configurable: true, writable: true });
+      hooked = nativeEvent.addListener !== add;
+    } catch (e) { /* locked */ }
+    if (!hooked) {
+      try {
+        const proto = Object.getPrototypeOf(nativeEvent);
+        const add = proto.addListener;
+        const remove = proto.removeListener;
+        Object.defineProperty(proto, "addListener", { value: record(add), configurable: true, writable: true });
+        if (remove) Object.defineProperty(proto, "removeListener", { value: unrecord(remove), configurable: true, writable: true });
+        hooked = proto.addListener !== add;
+      } catch (e) { /* locked */ }
+    }
+    sendLog(hooked ? "info" : "error", [hooked
+      ? "onMessageExternal: recording listeners on WebKit's event"
+      : "onMessageExternal: couldn't intercept WebKit's event; website messages won't reach this extension"]);
   }
 
   if (isBackground) try {
