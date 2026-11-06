@@ -1048,6 +1048,12 @@ extension BrowserWindow: WKNavigationDelegate {
             decisionHandler(.cancel, preferences)
             return
         }
+        // chrome:// pages only exist in Chrome; chrome://newtab becomes Inkwell's own new-tab page.
+        if let url = navigationAction.request.url, url.scheme?.lowercased() == "chrome" {
+            decisionHandler(.cancel, preferences)
+            if let tab = tab(for: webView), tab === activeTab { updateToolbar() }
+            return
+        }
         // chrome-extension://<Chrome Web Store ID>/… → the same file in the installed extension.
         if let url = navigationAction.request.url, url.scheme == "chrome-extension" {
             decisionHandler(.cancel, preferences)

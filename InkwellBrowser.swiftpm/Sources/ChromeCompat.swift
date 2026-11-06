@@ -653,26 +653,149 @@ enum ExtensionPatcher {
     onDetach: makeEvent(),
   };
 
-  // ---------- chrome.tabGroups (accepted but not shown) ----------
+  // ---------- chrome.tabGroups: emulated, shared by all extension pages via storage.local ----------
 
-  const groups = new Map();
-  let nextGroupId = 1;
-  const groupInfo = (id) => groups.get(id) || { id, collapsed: false, color: "grey", title: "", windowId: -1 };
+  const GROUPS_KEY = "__inkwellTabGroups";
+  let groupState = { next: 1, groups: {} };
+  const localStore = promiseAPI.storage && promiseAPI.storage.local;
+  const groupsReady = (async () => {
+    try {
+      const stored = await localStore.get(GROUPS_KEY);
+      if (stored && stored[GROUPS_KEY] && stored[GROUPS_KEY].groups) groupState = stored[GROUPS_KEY];
+    } catch (e) { /* no storage */ }
+  })();
+  try {
+    promiseAPI.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes[GROUPS_KEY] && changes[GROUPS_KEY].newValue) groupState = changes[GROUPS_KEY].newValue;
+    });
+  } catch (e) { /* no storage events */ }
+  const saveGroups = () => { try { const p = localStore.set({ [GROUPS_KEY]: groupState }); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ } };
+  const groupOfTab = (tabId) => {
+    for (const grp of Object.values(groupState.groups)) if (grp.tabIds.includes(tabId)) return grp.id;
+    return -1;
+  };
+  const groupInfo = (grp) => ({ id: grp.id, title: grp.title || "", color: grp.color || "grey", collapsed: !!grp.collapsed, windowId: grp.windowId == null ? -1 : grp.windowId });
+  const withGroup = (tab) => (tab && typeof tab === "object" && typeof tab.id === "number") ? Object.assign({}, tab, { groupId: groupOfTab(tab.id) }) : tab;
+  const removeTabsFromGroups = (ids) => {
+    let changed = false;
+    for (const grp of Object.values(groupState.groups)) {
+      const before = grp.tabIds.length;
+      grp.tabIds = grp.tabIds.filter((t) => !ids.includes(t));
+      if (grp.tabIds.length !== before) changed = true;
+    }
+    for (const [key, grp] of Object.entries(groupState.groups)) {
+      if (!grp.tabIds.length) { delete groupState.groups[key]; tabGroups.onRemoved._dispatch(groupInfo(grp)); changed = true; }
+    }
+    return changed;
+  };
+
   const tabGroups = {
     TAB_GROUP_ID_NONE: -1,
     Color: { GREY: "grey", BLUE: "blue", RED: "red", YELLOW: "yellow", GREEN: "green", PINK: "pink", PURPLE: "purple", CYAN: "cyan", ORANGE: "orange" },
-    query: wrap(async () => Array.from(groups.values())),
-    get: wrap(async (id) => groupInfo(id)),
-    update: wrap(async (id, props) => { const g2 = Object.assign(groupInfo(id), props || {}); groups.set(id, g2); return g2; }),
-    move: wrap(async (id) => groupInfo(id)),
+    get: wrap(async (id) => {
+      await groupsReady;
+      const grp = groupState.groups[id];
+      if (!grp) throw new Error("No group with id: " + id + ".");
+      return groupInfo(grp);
+    }),
+    query: wrap(async (q) => {
+      await groupsReady;
+      const f = q || {};
+      return Object.values(groupState.groups).map(groupInfo).filter((grp) =>
+        (f.title === undefined || grp.title === f.title) && (f.color === undefined || grp.color === f.color) &&
+        (f.collapsed === undefined || grp.collapsed === f.collapsed) && (f.windowId === undefined || f.windowId === -2 || grp.windowId === f.windowId));
+    }),
+    update: wrap(async (id, props) => {
+      await groupsReady;
+      const grp = groupState.groups[id];
+      if (!grp) throw new Error("No group with id: " + id + ".");
+      for (const k of ["title", "color", "collapsed"]) if (props && props[k] !== undefined) grp[k] = props[k];
+      saveGroups();
+      tabGroups.onUpdated._dispatch(groupInfo(grp));
+      return groupInfo(grp);
+    }),
+    move: wrap(async (id, props) => {
+      await groupsReady;
+      const grp = groupState.groups[id];
+      if (!grp) throw new Error("No group with id: " + id + ".");
+      if (props && props.windowId != null) grp.windowId = props.windowId;
+      saveGroups();
+      tabGroups.onMoved._dispatch(groupInfo(grp));
+      return groupInfo(grp);
+    }),
     onCreated: makeEvent(), onUpdated: makeEvent(), onRemoved: makeEvent(), onMoved: makeEvent(),
   };
+
   const tabsGroup = wrap(async (options) => {
-    const id = (options && options.groupId) || nextGroupId++;
-    if (!groups.has(id)) groups.set(id, { id, collapsed: false, color: "grey", title: "", windowId: -1 });
-    return id;
+    await groupsReady;
+    const o = options || {};
+    const ids = [].concat(o.tabIds == null ? [] : o.tabIds);
+    if (!ids.length) throw new Error("No tabs specified.");
+    let grp = o.groupId != null ? groupState.groups[o.groupId] : null;
+    if (o.groupId != null && !grp) throw new Error("No group with id: " + o.groupId + ".");
+    let created = false;
+    if (!grp) {
+      let windowId = o.createProperties && o.createProperties.windowId;
+      if (windowId == null) { try { windowId = (await promiseAPI.tabs.get(ids[0])).windowId; } catch (e) { windowId = -1; } }
+      const id = groupState.next++;
+      grp = groupState.groups[id] = { id, title: "", color: "grey", collapsed: false, windowId, tabIds: [] };
+      created = true;
+    }
+    removeTabsFromGroups(ids);
+    groupState.groups[grp.id] = grp;
+    for (const t of ids) if (!grp.tabIds.includes(t)) grp.tabIds.push(t);
+    saveGroups();
+    if (created) tabGroups.onCreated._dispatch(groupInfo(grp));
+    return grp.id;
   });
-  const tabsUngroup = wrap(async () => undefined);
+  const tabsUngroup = wrap(async (tabIds) => {
+    await groupsReady;
+    if (removeTabsFromGroups([].concat(tabIds == null ? [] : tabIds))) saveGroups();
+  });
+
+  // Chrome-only pages: chrome://newtab opens an ordinary new tab.
+  const cleanTabURL = (props) => {
+    if (props && typeof props.url === "string" && /^chrome:\/\/(newtab|new-tab-page)\/?$/i.test(props.url)) {
+      const copy = Object.assign({}, props);
+      delete copy.url;
+      return copy;
+    }
+    return props;
+  };
+
+  const patchTabsAPI = (tabs) => {
+    if (!tabs || tabs.__inkwellGroups) return;
+    const replace = (name, fn) => {
+      try { Object.defineProperty(tabs, name, { value: fn, configurable: true, writable: true }); }
+      catch (e) { try { tabs[name] = fn; } catch (e2) { sendLog("warn", ["Couldn't patch tabs." + name]); } }
+    };
+    const original = {};
+    for (const name of ["query", "get", "create", "update", "duplicate"]) {
+      if (typeof tabs[name] === "function") original[name] = tabs[name].bind(tabs);
+    }
+    if (original.query) replace("query", wrap(async (queryInfo) => {
+      await groupsReady;
+      const q = Object.assign({}, queryInfo || {});
+      const wanted = q.groupId;
+      delete q.groupId;
+      const result = (await original.query(q)).map(withGroup);
+      return wanted === undefined ? result : result.filter((t) => t.groupId === wanted);
+    }));
+    if (original.get) replace("get", wrap(async (id) => withGroup(await original.get(id))));
+    if (original.create) replace("create", wrap(async (props) => withGroup(await original.create(cleanTabURL(props) || {}))));
+    if (original.update) replace("update", wrap(async (a, b) => {
+      const result = typeof a === "number" ? await original.update(a, cleanTabURL(b) || {}) : await original.update(cleanTabURL(a) || {});
+      return withGroup(result);
+    }));
+    if (original.duplicate) replace("duplicate", wrap(async (id) => withGroup(await original.duplicate(id))));
+    replace("group", tabsGroup);
+    replace("ungroup", tabsUngroup);
+    try { Object.defineProperty(tabs, "TAB_ID_NONE", { value: tabs.TAB_ID_NONE == null ? -1 : tabs.TAB_ID_NONE, configurable: true }); } catch (e) { /* ignore */ }
+    try { tabs.__inkwellGroups = true; } catch (e) { /* frozen */ }
+    if (isBackground) {
+      try { tabs.onRemoved.addListener((tabId) => { groupsReady.then(() => { if (removeTabsFromGroups([tabId])) saveGroups(); }); }); } catch (e) { /* no event */ }
+    }
+  };
 
   // ---------- chrome.offscreen ----------
 
@@ -1095,10 +1218,7 @@ enum ExtensionPatcher {
     }
     const identity = define(ns, "identity", {});
     if (identity) for (const [name, value] of Object.entries(identityMembers)) define(identity, name, value);
-    if (ns.tabs) {
-      define(ns.tabs, "group", tabsGroup);
-      define(ns.tabs, "ungroup", tabsUngroup);
-    }
+    patchTabsAPI(ns.tabs);
   }
   fillMissingAPIs();
 })();
