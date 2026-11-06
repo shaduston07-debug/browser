@@ -25,7 +25,7 @@ enum ExtensionPatcher {
               var manifest = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
 
         // 1. The compatibility script (rewritten every time so updates take effect).
-        let meta: [String: Any] = ["storeID": storeID ?? "", "version": 1]
+        let meta: [String: Any] = ["storeID": storeID ?? "", "version": 2, "apiRefs": scanAPIReferences(in: root)]
         let metaJSON = (try? JSONSerialization.data(withJSONObject: meta)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let script = "globalThis.__INKWELL__ = \(metaJSON);\n" + compatScript
         try? script.write(to: root.appendingPathComponent(compatFileName), atomically: true, encoding: .utf8)
@@ -127,6 +127,31 @@ enum ExtensionPatcher {
             }
             try? html.write(to: file, atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Every chrome.<api>.<member>[.<sub>] the extension's code mentions, so the compatibility
+    /// layer can stand in for the ones WebKit doesn't implement.
+    static func scanAPIReferences(in root: URL) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?<![\w$.])(?:chrome|browser)\.([a-zA-Z]+)\.([a-zA-Z_]+)(?:\.([A-Za-z_]+))?"#) else { return [] }
+        var refs = Set<String>()
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
+        for case let file as URL in enumerator
+        where file.pathExtension == "js" && !file.lastPathComponent.hasPrefix("__inkwell") {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            regex.enumerateMatches(in: text, range: range) { match, _, _ in
+                guard let match else { return }
+                var parts: [String] = []
+                for group in 1...3 {
+                    let r = match.range(at: group)
+                    if r.location != NSNotFound, let swiftRange = Range(r, in: text) { parts.append(String(text[swiftRange])) }
+                }
+                refs.insert(parts.joined(separator: "."))
+            }
+            if refs.count > 3000 { break }
+        }
+        return refs.sorted()
     }
 
     static let compatScript = #"""
@@ -616,9 +641,25 @@ enum ExtensionPatcher {
       if (msg && msg.__inkwellLog === true) { sendLog(msg.level || "info", ["[" + (msg.source || "content") + "] " + msg.text]); return false; }
       if (!msg || msg.__inkwellExternal !== true) return false;
       if (externalListeners.size === 0) {
-        sendLog("warn", ["Website message (" + (msg.message && msg.message.type) + ") arrived before the extension registered onMessageExternal"]);
-        return false;
+        // The extension's background may still be starting; wait for it to register a listener.
+        const started = Date.now();
+        const retry = () => {
+          if (externalListeners.size > 0) { deliverExternal(msg, sender, sendResponse); return; }
+          if (Date.now() - started > 8000) {
+            sendLog("warn", ["Website message (" + (msg.message && msg.message.type) + ") timed out: the extension never registered onMessageExternal"]);
+            try { sendResponse(undefined); } catch (e) { /* closed */ }
+            return;
+          }
+          setTimeout(retry, 100);
+        };
+        retry();
+        return true;
       }
+      return deliverExternal(msg, sender, sendResponse);
+    });
+  } catch (e) { /* no runtime.onMessage in this context */ }
+
+  function deliverExternal(msg, sender, sendResponse) {
       const externalSender = { origin: msg.origin, url: msg.url, tab: sender && sender.tab, frameId: sender && sender.frameId };
       let responded = false;
       let async = false;
@@ -636,8 +677,7 @@ enum ExtensionPatcher {
       }
       if (!async) respond(undefined);
       return async;
-    });
-  } catch (e) { /* no runtime.onMessage in this context */ }
+  }
 
   // ---------- APIs WebKit doesn't have: notifications, downloads, declarativeNetRequest enums ----------
 
@@ -692,6 +732,44 @@ enum ExtensionPatcher {
     MAX_NUMBER_OF_SESSION_RULES: 5000, MAX_NUMBER_OF_DYNAMIC_RULES: 5000,
   }, dnrEnums);
 
+  // Generic safety net: Inkwell scans the extension for chrome.<api>.<member> references when it
+  // installs it (META.apiRefs). Anything WebKit doesn't provide gets a harmless stand-in so a
+  // single missing API doesn't crash the whole background script.
+  const fillMissingAPIs = () => {
+    const refs = Array.isArray(META.apiRefs) ? META.apiRefs : [];
+    const skip = new Set(["runtime.lastError", "extension.lastError", "extension.inIncognitoContext"]);
+    const filled = new Set();
+    for (const ref of refs) {
+      if (skip.has(ref.split(".").slice(0, 2).join("."))) continue;
+      const [nsName, member, sub] = ref.split(".");
+      for (const ns of namespaces) {
+        let target = ns[nsName];
+        if (target === undefined || target === null) {
+          target = define(ns, nsName, {});
+          if (!target) continue;
+          filled.add(nsName);
+        }
+        if (!member) continue;
+        if (target[member] === undefined) {
+          let value;
+          if (/^on[A-Z]/.test(member)) value = makeEvent();
+          else if (/^[A-Z]/.test(member) || (sub && /^[a-z]/.test(sub))) value = {};
+          else value = wrap(async () => undefined);
+          if (define(target, member, value) !== undefined) filled.add(nsName + "." + member);
+        }
+        const holder = target[member];
+        if (sub && holder && typeof holder === "object" && holder[sub] === undefined) {
+          let subValue;
+          if (/^[A-Z][A-Z0-9_]*$/.test(sub)) subValue = sub.toLowerCase().replace(/_([a-z0-9])/g, (m, c) => c.toUpperCase());
+          else if (/^on[A-Z]/.test(sub)) subValue = makeEvent();
+          else if (/^[a-z]/.test(sub) && !(sub === "addListener" || sub === "removeListener" || sub === "hasListener")) subValue = wrap(async () => undefined);
+          if (subValue !== undefined && define(holder, sub, subValue) !== undefined) filled.add(ref);
+        }
+      }
+    }
+    if (filled.size) sendLog("warn", ["Filled in Chrome APIs that WebKit lacks (they do nothing): " + Array.from(filled).join(", ")]);
+  };
+
   // ---------- install ----------
 
   for (const ns of namespaces) {
@@ -718,6 +796,7 @@ enum ExtensionPatcher {
       define(ns.tabs, "ungroup", tabsUngroup);
     }
   }
+  fillMissingAPIs();
 })();
 """#
 
