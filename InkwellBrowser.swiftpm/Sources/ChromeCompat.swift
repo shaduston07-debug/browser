@@ -735,6 +735,14 @@ enum ExtensionPatcher {
   // Generic safety net: Inkwell scans the extension for chrome.<api>.<member> references when it
   // installs it (META.apiRefs). Anything WebKit doesn't provide gets a harmless stand-in so a
   // single missing API doesn't crash the whole background script.
+  // What a do-nothing stand-in returns: lists for queries, empty objects for lookups.
+  const defaultResult = (name) => {
+    if (/^(getAll|query|search|getContexts|list)/.test(name)) return [];
+    if (/^get/.test(name)) return {};
+    if (/^(has|contains|is)/.test(name)) return false;
+    return undefined;
+  };
+
   const fillMissingAPIs = () => {
     const refs = Array.isArray(META.apiRefs) ? META.apiRefs : [];
     const skip = new Set(["runtime.lastError", "extension.lastError", "extension.inIncognitoContext"]);
@@ -754,7 +762,7 @@ enum ExtensionPatcher {
           let value;
           if (/^on[A-Z]/.test(member)) value = makeEvent();
           else if (/^[A-Z]/.test(member) || (sub && /^[a-z]/.test(sub))) value = {};
-          else value = wrap(async () => undefined);
+          else value = wrap(async () => defaultResult(member));
           if (define(target, member, value) !== undefined) filled.add(nsName + "." + member);
         }
         const holder = target[member];
@@ -762,7 +770,7 @@ enum ExtensionPatcher {
           let subValue;
           if (/^[A-Z][A-Z0-9_]*$/.test(sub)) subValue = sub.toLowerCase().replace(/_([a-z0-9])/g, (m, c) => c.toUpperCase());
           else if (/^on[A-Z]/.test(sub)) subValue = makeEvent();
-          else if (/^[a-z]/.test(sub) && !(sub === "addListener" || sub === "removeListener" || sub === "hasListener")) subValue = wrap(async () => undefined);
+          else if (/^[a-z]/.test(sub) && !(sub === "addListener" || sub === "removeListener" || sub === "hasListener")) subValue = wrap(async () => defaultResult(sub));
           if (subValue !== undefined && define(holder, sub, subValue) !== undefined) filled.add(ref);
         }
       }
@@ -876,6 +884,40 @@ enum ExtensionPatcher {
     }
   };
 
+  // ---------- chrome.windows on iPad: popups become tabs ----------
+  const popupTabs = new Map(); // fake window id -> tab id
+  let nextPopupWindowId = 1000;
+  const windowsExtras = {
+    create: wrap(async (data) => {
+      const d = data || {};
+      const urls = Array.isArray(d.url) ? d.url : (d.url ? [d.url] : [undefined]);
+      const tabs = [];
+      for (const url of urls) tabs.push(await promiseAPI.tabs.create({ url, active: d.focused !== false }));
+      const id = nextPopupWindowId++;
+      popupTabs.set(id, tabs.map((t) => t.id));
+      const first = tabs[0] || {};
+      return { id, focused: d.focused !== false, incognito: false, alwaysOnTop: false, state: "normal",
+        type: d.type || "normal", tabs, left: 0, top: 0, width: d.width || 0, height: d.height || 0, windowIdOfTabs: first.windowId };
+    }),
+    update: wrap(async (windowId, info) => {
+      const owned = popupTabs.get(windowId);
+      if (owned && owned.length && info && info.focused) { try { await promiseAPI.tabs.update(owned[0], { active: true }); } catch (e) { /* closed */ } }
+      try { return await promiseAPI.windows.get(windowId); } catch (e) { return { id: windowId, focused: true, state: "normal", type: "normal" }; }
+    }),
+    remove: wrap(async (windowId) => {
+      const owned = popupTabs.get(windowId);
+      if (owned) { popupTabs.delete(windowId); try { await promiseAPI.tabs.remove(owned); } catch (e) { /* closed */ } }
+    }),
+  };
+  const getContexts = wrap(async (filter) => {
+    const types = (filter && filter.contextTypes) || null;
+    const out = [];
+    if (!types || types.includes("OFFSCREEN_DOCUMENT")) {
+      try { if (await native("offscreen.has", {})) out.push({ contextType: "OFFSCREEN_DOCUMENT", contextId: "offscreen", documentUrl: "", frameId: -1, incognito: false, tabId: -1, windowId: -1 }); } catch (e) { /* none */ }
+    }
+    return out;
+  });
+
   // ---------- install ----------
 
   for (const ns of namespaces) {
@@ -884,6 +926,13 @@ enum ExtensionPatcher {
     define(ns, "tabGroups", tabGroups);
     define(ns, "offscreen", offscreen);
     define(ns, "notifications", notifications);
+    if (ns.windows) for (const [k, v] of Object.entries(windowsExtras)) define(ns.windows, k, v);
+    if (ns.runtime) {
+      define(ns.runtime, "getContexts", getContexts);
+      define(ns.runtime, "ContextType", { TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL", DEVELOPER_TOOLS: "DEVELOPER_TOOLS" });
+      define(ns.runtime, "OnInstalledReason", { INSTALL: "install", UPDATE: "update", CHROME_UPDATE: "chrome_update", SHARED_MODULE_UPDATE: "shared_module_update" });
+    }
+    if (ns.storage) define(ns.storage, "managed", { get: wrap(async () => ({})), getBytesInUse: wrap(async () => 0), onChanged: makeEvent() });
     define(ns, "downloads", downloads);
     const dnr = define(ns, "declarativeNetRequest", dnrStub);
     if (dnr) { wrapRuleUpdate(dnr, "updateSessionRules"); wrapRuleUpdate(dnr, "updateDynamicRules"); }
