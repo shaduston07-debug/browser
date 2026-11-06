@@ -1131,6 +1131,33 @@ enum ExtensionPatcher {
       return original.apply(this, args);
     };
   }
+  // Network diagnostics: log failed requests, and every sign-in related request (path + status only).
+  const interesting = (u) => /oauth|authorize|consent|login|auth/i.test(u);
+  const pathOf = (u) => { try { const x = new URL(u, location.href); return x.host + x.pathname; } catch (e) { return String(u).split("?")[0]; } };
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === "function") {
+    window.fetch = function (input, init) {
+      const url = typeof input === "string" ? input : (input && input.url) || String(input);
+      const method = (init && init.method) || (input && input.method) || "GET";
+      const started = Date.now();
+      const p = originalFetch.apply(this, arguments);
+      p.then((r) => {
+        if (!r.ok || interesting(url)) pageLog("fetch " + method + " " + pathOf(url) + " → " + r.status + " (" + (Date.now() - started) + "ms)");
+      }, (e) => pageLog("fetch " + method + " " + pathOf(url) + " FAILED: " + (e && e.message)));
+      return p;
+    };
+  }
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  const xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) { this.__ink = [method, String(url)]; return xhrOpen.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function () {
+    const info = this.__ink || ["?", "?"];
+    this.addEventListener("loadend", () => {
+      if (this.status >= 400 || this.status === 0 || interesting(info[1])) pageLog("xhr " + info[0] + " " + pathOf(info[1]) + " → " + this.status);
+    });
+    return xhrSend.apply(this, arguments);
+  };
+
   const originalOpen = window.open;
   window.open = function (url, ...rest) {
     pageLog("page called window.open(" + String(url).split("?")[0] + ")");
