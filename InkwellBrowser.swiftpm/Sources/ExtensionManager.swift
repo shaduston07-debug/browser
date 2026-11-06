@@ -403,6 +403,16 @@ enum ChromeWebStore {
 // MARK: - WKWebExtensionControllerDelegate
 
 extension ExtensionManager: WKWebExtensionControllerDelegate {
+    /// runtime.connectNative — used by the compatibility layer to open WebSockets from the app.
+    func webExtensionController(_ controller: WKWebExtensionController,
+                                connectUsing port: WKWebExtension.MessagePort,
+                                for extensionContext: WKWebExtensionContext,
+                                completionHandler: @escaping ((any Error)?) -> Void) {
+        NativeWebSocketProxy.attach(to: port, storeID: record(for: extensionContext)?.storeID,
+                                    extensionName: extensionContext.webExtension.displayName ?? "Extension")
+        completionHandler(nil)
+    }
+
     /// runtime.sendNativeMessage — used by Inkwell's Chrome compatibility layer.
     func webExtensionController(_ controller: WKWebExtensionController,
                                 sendMessage message: Any,

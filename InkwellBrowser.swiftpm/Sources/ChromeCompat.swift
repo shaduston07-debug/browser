@@ -277,13 +277,108 @@ enum ExtensionPatcher {
     g.addEventListener("unhandledrejection", (e) => sendLog("error", ["Unhandled rejection:", e.reason]));
   } catch (e) { /* no event target */ }
 
-  // Log WebSocket lifecycle (connection problems are otherwise invisible).
-  if (typeof g.WebSocket === "function" && !g.WebSocket.__inkwell) {
-    const NativeWebSocket = g.WebSocket;
-    const redact = (u) => String(u).replace(/([?&](token|key|auth)[^=]*=)[^&]+/gi, "$1…");
+  // WebSockets: for store extensions, connect through the app (runtime.connectNative) so the
+  // connection carries Chrome's Origin (chrome-extension://<id>); servers reject WebKit's origin.
+  const redactURL = (u) => String(u).replace(/([?&](token|key|auth)[^=]*=)[^&]+/gi, "$1…");
+  const toBase64 = (bytes) => {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  };
+  const fromBase64 = (b64) => {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+
+  const NativeWebSocket = g.WebSocket;
+  const canProxy = !!(META.storeID && chromeAPI.runtime && typeof chromeAPI.runtime.connectNative === "function" && typeof g.EventTarget === "function");
+
+  if (typeof NativeWebSocket === "function" && !NativeWebSocket.__inkwell && canProxy) {
+    class ProxiedWebSocket extends EventTarget {
+      constructor(url, protocols) {
+        super();
+        this.url = String(url);
+        this.readyState = 0;
+        this.protocol = "";
+        this.extensions = "";
+        this.bufferedAmount = 0;
+        this.binaryType = "blob";
+        this.onopen = null; this.onmessage = null; this.onerror = null; this.onclose = null;
+        sendLog("info", ["WebSocket (via app) connecting: " + redactURL(this.url)]);
+        try {
+          this._port = chromeAPI.runtime.connectNative(APP_ID);
+          this._port.onMessage.addListener((m) => this._handle(m));
+          this._port.onDisconnect.addListener(() => { if (this.readyState < 3) this._finish(1006, "app connection closed", false); });
+          this._port.postMessage({ inkwell: "ws.open", url: this.url, protocols: protocols == null ? [] : [].concat(protocols) });
+        } catch (e) {
+          sendLog("error", ["connectNative failed: " + (e && e.message)]);
+          setTimeout(() => { this._emit("error", new Event("error")); this._finish(1006, "connectNative failed", false); }, 0);
+        }
+      }
+      _emit(type, event) {
+        const handler = this["on" + type];
+        if (typeof handler === "function") { try { handler.call(this, event); } catch (e) { console.error(e); } }
+        this.dispatchEvent(event);
+      }
+      _finish(code, reason, wasClean) {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        let event;
+        try { event = new CloseEvent("close", { code, reason, wasClean }); }
+        catch (e) { event = new Event("close"); event.code = code; event.reason = reason; event.wasClean = wasClean; }
+        this._emit("close", event);
+        try { this._port && this._port.disconnect(); } catch (e) { /* already closed */ }
+      }
+      _handle(m) {
+        if (!m || typeof m !== "object") return;
+        if (m.type === "open") {
+          this.readyState = 1;
+          this.protocol = m.protocol || "";
+          this._emit("open", new Event("open"));
+        } else if (m.type === "message") {
+          let data = m.text;
+          if (m.base64 != null) {
+            const bytes = fromBase64(m.base64);
+            data = this.binaryType === "arraybuffer" ? bytes.buffer : new Blob([bytes]);
+          }
+          this._emit("message", new MessageEvent("message", { data, origin: this.url }));
+        } else if (m.type === "error") {
+          this._emit("error", new Event("error"));
+        } else if (m.type === "close") {
+          this._finish(m.code || 1006, m.reason || "", !!m.wasClean);
+        }
+      }
+      send(data) {
+        if (this.readyState === 0) throw new DOMException("Still in CONNECTING state.", "InvalidStateError");
+        if (this.readyState !== 1) return;
+        if (typeof data === "string") { this._port.postMessage({ inkwell: "ws.send", text: data }); return; }
+        if (data instanceof Blob) {
+          data.arrayBuffer().then((buf) => this._port.postMessage({ inkwell: "ws.send", base64: toBase64(new Uint8Array(buf)) }));
+          return;
+        }
+        const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        this._port.postMessage({ inkwell: "ws.send", base64: toBase64(bytes) });
+      }
+      close(code, reason) {
+        if (this.readyState >= 2) return;
+        this.readyState = 2;
+        try { this._port.postMessage({ inkwell: "ws.close", code: code || 1000, reason: reason || "" }); }
+        catch (e) { this._finish(code || 1000, reason || "", true); }
+      }
+    }
+    for (const [k, v] of [["CONNECTING", 0], ["OPEN", 1], ["CLOSING", 2], ["CLOSED", 3]]) {
+      ProxiedWebSocket[k] = v;
+      ProxiedWebSocket.prototype[k] = v;
+    }
+    ProxiedWebSocket.__inkwell = true;
+    g.WebSocket = ProxiedWebSocket;
+  } else if (typeof NativeWebSocket === "function" && !NativeWebSocket.__inkwell) {
+    // Not proxied: just log the lifecycle so connection problems are visible.
     const Wrapped = function (url, protocols) {
       const ws = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
-      const label = redact(url);
+      const label = redactURL(url);
       sendLog("info", ["WebSocket connecting: " + label]);
       ws.addEventListener("open", () => sendLog("info", ["WebSocket open: " + label]));
       ws.addEventListener("close", (e) => sendLog("warn", ["WebSocket closed: " + label + " (code " + e.code + (e.reason ? ", " + e.reason : "") + ")"]));
