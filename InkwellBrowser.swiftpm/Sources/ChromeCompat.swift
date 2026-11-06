@@ -1165,10 +1165,19 @@ enum ExtensionPatcher {
   };
   window.addEventListener("pagehide", () => pageLog("page leaving " + location.pathname));
 
+  // A message is for this extension if it's addressed to its Chrome ID, or if its contents mention that
+  // ID (e.g. an OAuth redirect_uri of chrome-extension://<id>/…) — sites sometimes address a sibling ID.
+  const mentionsUs = (m) => { try { return JSON.stringify(m).includes(STORE_ID); } catch (e) { return false; } };
+  const describe = (m) => (m && typeof m === "object" ? m.type : typeof m);
+
   rt.sendMessage = function (extensionId, message, optionsOrCallback, maybeCallback) {
     if (extensionId !== STORE_ID) {
-      if (typeof previousSend === "function") return previousSend.apply(this, arguments);
-      return Promise.reject(new Error("Could not establish connection. Receiving end does not exist."));
+      if (!mentionsUs(message)) {
+        pageLog("page messaged another extension id " + String(extensionId) + " (type=" + describe(message) + ")");
+        if (typeof previousSend === "function") return previousSend.apply(this, arguments);
+        return Promise.reject(new Error("Could not establish connection. Receiving end does not exist."));
+      }
+      pageLog("page addressed extension id " + String(extensionId) + " but the message is for " + STORE_ID + "; delivering it");
     }
     const callback = [optionsOrCallback, maybeCallback].find((f) => typeof f === "function");
     const type = message && typeof message === "object" ? message.type : typeof message;
