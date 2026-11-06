@@ -1029,6 +1029,15 @@ extension BrowserWindow: WKNavigationDelegate {
                  decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void) {
         preferences.preferredContentMode = .desktop
 
+        if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(),
+           !["http", "https", "about", "blob", "data", "webkit-extension", "safari-web-extension"].contains(scheme) {
+            ExtensionLogStore.shared.add(extension: "Inkwell", level: "info", where: "app",
+                                         text: "Navigation to \(scheme)://\(url.host ?? "")\(url.path)")
+        } else if let url = navigationAction.request.url, url.host == "claude.ai", url.path.hasPrefix("/oauth") {
+            ExtensionLogStore.shared.add(extension: "Inkwell", level: "info", where: "app",
+                                         text: "Navigation to claude.ai\(url.path) (\(navigationAction.navigationType.rawValue))")
+        }
+
         if navigationAction.shouldPerformDownload {
             decisionHandler(.download, preferences)
             return
@@ -1081,6 +1090,8 @@ extension BrowserWindow: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
         let nsError = error as NSError
+        ExtensionLogStore.shared.add(extension: "Inkwell", level: "warn", where: "app",
+                                     text: "Page load failed (\(nsError.domain) \(nsError.code)): \(nsError.localizedDescription) — \((nsError.userInfo[NSURLErrorFailingURLStringErrorKey] as? String ?? "").prefix(120))")
         // Cancelled loads and "frame load interrupted" (downloads) aren't real failures.
         if nsError.code == NSURLErrorCancelled || (nsError.domain == "WebKitErrorDomain" && nsError.code == 102) { return }
         let failingURL = nsError.userInfo[NSURLErrorFailingURLErrorKey] as? URL

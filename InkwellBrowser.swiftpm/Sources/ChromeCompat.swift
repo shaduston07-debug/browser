@@ -1111,7 +1111,32 @@ enum ExtensionPatcher {
     if (resolve) { pending.delete(data.id); resolve(data.response); }
   });
 
-  window.postMessage({ __inkwellPageLog: true, extensionId: STORE_ID, text: "page shim active on " + location.origin }, "*");
+  const pageLog = (text) => window.postMessage({ __inkwellPageLog: true, extensionId: STORE_ID, text: String(text).slice(0, 1500) }, "*");
+  pageLog("page shim active on " + location.origin + location.pathname);
+
+  // Diagnostics: page errors, and which chrome.runtime features the site touches.
+  window.addEventListener("error", (e) => pageLog("page error: " + (e.message || "") + " @ " + (e.filename || "") + ":" + (e.lineno || 0)));
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    pageLog("page unhandled rejection: " + (r && (r.stack || r.message) || String(r)));
+  });
+  for (const level of ["error", "warn"]) {
+    const original = console[level];
+    console[level] = function (...args) {
+      try {
+        pageLog("page console." + level + ": " + args.map((a) => {
+          try { return typeof a === "string" ? a : (a instanceof Error ? (a.stack || a.message) : JSON.stringify(a)); } catch (e) { return String(a); }
+        }).join(" "));
+      } catch (e) { /* ignore */ }
+      return original.apply(this, args);
+    };
+  }
+  const originalOpen = window.open;
+  window.open = function (url, ...rest) {
+    pageLog("page called window.open(" + String(url).split("?")[0] + ")");
+    return originalOpen.call(this, url, ...rest);
+  };
+  window.addEventListener("pagehide", () => pageLog("page leaving " + location.pathname));
 
   rt.sendMessage = function (extensionId, message, optionsOrCallback, maybeCallback) {
     if (extensionId !== STORE_ID) {
@@ -1127,6 +1152,16 @@ enum ExtensionPatcher {
       window.postMessage({ __inkwellExternal: true, extensionId: STORE_ID, id, message }, "*");
     });
   };
+
+  const seen = new Set();
+  try {
+    window.chrome.runtime = new Proxy(rt, {
+      get(target, prop) {
+        if (typeof prop === "string" && !seen.has(prop)) { seen.add(prop); pageLog("page read chrome.runtime." + prop); }
+        return target[prop];
+      },
+    });
+  } catch (e) { /* ignore */ }
 })();
 """#
 
