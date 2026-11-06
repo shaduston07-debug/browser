@@ -154,6 +154,9 @@ final class BrowserWindow: UIViewController {
         addressField.rightViewMode = .unlessEditing
         addressField.heightAnchor.constraint(equalToConstant: 34).isActive = true
         addressField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // A long URL must shrink the address bar, never push the toolbar buttons off screen.
+        addressField.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        addressField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
 
         extensionButtonStack.axis = .horizontal
         extensionButtonStack.spacing = 2
@@ -1171,6 +1174,7 @@ extension BrowserWindow {
         button.toolTip = label
         button.isPointerInteractionEnabled = true
         button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }
 }

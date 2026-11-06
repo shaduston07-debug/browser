@@ -770,6 +770,112 @@ enum ExtensionPatcher {
     if (filled.size) sendLog("warn", ["Filled in Chrome APIs that WebKit lacks (they do nothing): " + Array.from(filled).join(", ")]);
   };
 
+  // ---------- declarativeNetRequest header rules WebKit rejects ----------
+  // WebKit only lets extensions modify a few standard headers. For modifyHeaders rules it rejects,
+  // apply the request headers ourselves on this extension's own fetch()/XHR calls.
+
+  const jsHeaderRules = new Map(); // rule id -> { test(url), headers: [[name, value]] }
+  const filterToRegex = (filter) => {
+    let f = String(filter || "*");
+    let prefix = "^";
+    if (f.startsWith("||")) { f = f.slice(2); prefix = "^[a-z]+://([^/]*\\.)?"; }
+    else if (f.startsWith("|")) { f = f.slice(1); }
+    else { prefix = ""; }
+    let suffix = "";
+    if (f.endsWith("|")) { f = f.slice(0, -1); suffix = "$"; }
+    const body = f.split("").map((c) => {
+      if (c === "*") return ".*";
+      if (c === "^") return "([^a-zA-Z0-9_.%-]|$)";
+      return c.replace(/[.+?${}()|[\]\\\/]/g, "\\$&");
+    }).join("");
+    return new RegExp(prefix + body + suffix);
+  };
+  const ruleMatcher = (condition) => {
+    const c = condition || {};
+    const regex = c.regexFilter ? new RegExp(c.regexFilter) : filterToRegex(c.urlFilter);
+    const domains = c.requestDomains || c.domains || null;
+    return (url) => {
+      try {
+        if (domains) {
+          const host = new URL(url).hostname;
+          if (!domains.some((d) => host === d || host.endsWith("." + d))) return false;
+        }
+        return regex.test(url);
+      } catch (e) { return false; }
+    };
+  };
+  const takeOverHeaderRules = (options) => {
+    const opts = Object.assign({}, options || {});
+    for (const id of opts.removeRuleIds || []) jsHeaderRules.delete(id);
+    const keep = [];
+    for (const rule of opts.addRules || []) {
+      const action = rule && rule.action;
+      if (action && action.type === "modifyHeaders" && Array.isArray(action.requestHeaders)) {
+        const headers = action.requestHeaders.filter((h) => h.operation === "set" && h.value != null).map((h) => [h.header, h.value]);
+        if (headers.length) jsHeaderRules.set(rule.id, { test: ruleMatcher(rule.condition), headers });
+        if (!action.responseHeaders) continue;
+        keep.push(Object.assign({}, rule, { action: { type: "modifyHeaders", responseHeaders: action.responseHeaders } }));
+      } else {
+        keep.push(rule);
+      }
+    }
+    opts.addRules = keep;
+    return opts;
+  };
+  const headersFor = (url) => {
+    const out = [];
+    for (const rule of jsHeaderRules.values()) if (rule.test(url)) out.push(...rule.headers);
+    return out;
+  };
+
+  if (typeof g.fetch === "function" && !g.fetch.__inkwell) {
+    const nativeFetch = g.fetch.bind(g);
+    const patchedFetch = (input, init) => {
+      try {
+        const url = typeof input === "string" ? input : (input && input.url) || String(input);
+        const extra = headersFor(url);
+        if (extra.length) {
+          const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined));
+          for (const [k, v] of extra) { try { headers.set(k, v); } catch (e) { /* forbidden header */ } }
+          init = Object.assign({}, init || {}, { headers });
+        }
+      } catch (e) { /* fall through */ }
+      return nativeFetch(input, init);
+    };
+    patchedFetch.__inkwell = true;
+    g.fetch = patchedFetch;
+  }
+  if (typeof g.XMLHttpRequest === "function" && !g.XMLHttpRequest.prototype.__inkwell) {
+    const proto = g.XMLHttpRequest.prototype;
+    const open = proto.open;
+    const send = proto.send;
+    proto.open = function (method, url, ...rest) { this.__inkwellURL = String(url); return open.call(this, method, url, ...rest); };
+    proto.send = function (...args) {
+      for (const [k, v] of headersFor(this.__inkwellURL || "")) { try { this.setRequestHeader(k, v); } catch (e) { /* forbidden */ } }
+      return send.apply(this, args);
+    };
+    proto.__inkwell = true;
+  }
+
+  const wrapRuleUpdate = (dnr, name) => {
+    const original = dnr[name];
+    if (typeof original !== "function" || original.__inkwell) return;
+    const replacement = wrap(async (options) => {
+      const remaining = takeOverHeaderRules(options);
+      if (!(remaining.addRules || []).length && !(remaining.removeRuleIds || []).length) return undefined;
+      try {
+        return await original.call(dnr, remaining);
+      } catch (e) {
+        sendLog("warn", ["declarativeNetRequest." + name + " rejected by WebKit: " + (e && e.message)]);
+        return undefined;
+      }
+    });
+    replacement.__inkwell = true;
+    try { dnr[name] = replacement; } catch (e) {
+      try { Object.defineProperty(dnr, name, { value: replacement, configurable: true, writable: true }); } catch (e2) { /* frozen */ }
+    }
+  };
+
   // ---------- install ----------
 
   for (const ns of namespaces) {
@@ -780,6 +886,7 @@ enum ExtensionPatcher {
     define(ns, "notifications", notifications);
     define(ns, "downloads", downloads);
     const dnr = define(ns, "declarativeNetRequest", dnrStub);
+    if (dnr) { wrapRuleUpdate(dnr, "updateSessionRules"); wrapRuleUpdate(dnr, "updateDynamicRules"); }
     if (dnr && dnr !== dnrStub) {
       // WebKit's own API: fill in any missing enum objects/values Chrome code expects.
       for (const [name, values] of Object.entries(dnrEnums)) {
