@@ -9,6 +9,12 @@ final class BrowserTab: NSObject {
     weak var window: BrowserWindow?
     /// Called whenever title / URL / loading state changes.
     var onChange: ((BrowserTab) -> Void)?
+    /// Called as the page loads (progress bar only; kept separate so it stays cheap).
+    var onProgress: ((BrowserTab) -> Void)?
+    /// When the page's web process last crashed (used to avoid crash → reload → crash loops).
+    var lastCrash: Date?
+    /// Set when a background tab crashed; it reloads when you switch to it.
+    var needsReloadOnSelect = false
 
     private var observations: [NSKeyValueObservation] = []
 
@@ -50,7 +56,7 @@ final class BrowserTab: NSObject {
                 MainActor.assumeIsolated { if let self { notify(self, .loading) } }
             },
             webView.observe(\.estimatedProgress) { [weak self] _, _ in
-                MainActor.assumeIsolated { if let self { self.onChange?(self) } }
+                MainActor.assumeIsolated { if let self { self.onProgress?(self) } }
             },
             webView.observe(\.canGoBack) { [weak self] _, _ in
                 MainActor.assumeIsolated { if let self { self.onChange?(self) } }

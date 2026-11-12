@@ -314,6 +314,7 @@ final class BrowserWindow: UIViewController {
         tab.webView.uiDelegate = self
         tab.webView.navigationDelegate = self
         tab.onChange = { [weak self] tab in self?.tabDidChange(tab) }
+        tab.onProgress = { [weak self] tab in self?.tabProgressDidChange(tab) }
 
         var index = tabs.count
         if insertAfterActive, let active = activeTab, let i = tabs.firstIndex(of: active) { index = i + 1 }
@@ -341,6 +342,10 @@ final class BrowserWindow: UIViewController {
         let previous = activeTab
         previous?.webView.removeFromSuperview()
         activeTab = tab
+        if tab.needsReloadOnSelect {
+            tab.needsReloadOnSelect = false
+            tab.webView.reload()
+        }
 
         let webView = tab.webView
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -388,7 +393,26 @@ final class BrowserWindow: UIViewController {
     private func tabDidChange(_ tab: BrowserTab) {
         reloadTabStrip()
         if tab === activeTab { updateToolbar() }
-        SessionStore.save(self)
+        scheduleSessionSave()
+    }
+
+    private func tabProgressDidChange(_ tab: BrowserTab) {
+        guard tab === activeTab else { return }
+        let webView = tab.webView
+        progressBar.isHidden = !webView.isLoading
+        progressBar.setProgress(Float(webView.estimatedProgress), animated: webView.isLoading)
+    }
+
+    /// Saving open tabs is batched: busy pages change title/URL many times a second.
+    private var sessionSaveWork: DispatchWorkItem?
+    private func scheduleSessionSave() {
+        sessionSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { SessionStore.save(self) }
+        }
+        sessionSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     private func reloadTabStrip() {
@@ -1129,8 +1153,42 @@ extension BrowserWindow: WKNavigationDelegate {
         }
     }
 
+    /// A page's web process crashed (usually it ran out of memory). Reload it once; if it crashes
+    /// again soon after, stop and show a message instead of looping crash → reload → crash.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        guard let tab = tab(for: webView) else { return }
+        let now = Date()
+        let crashedRecently = tab.lastCrash.map { now.timeIntervalSince($0) < 30 } ?? false
+        tab.lastCrash = now
+        let host = webView.url?.host ?? "page"
+        ExtensionLogStore.shared.add(extension: "Inkwell", level: "warn", where: "app",
+                                     text: "Web page process crashed on \(host)" + (crashedRecently ? " again; not reloading automatically" : "; reloading"))
+
+        guard tab === activeTab else {
+            tab.needsReloadOnSelect = true
+            return
+        }
+        guard crashedRecently else {
+            webView.reload()
+            return
+        }
+        let target = webView.url?.absoluteString ?? ""
+        let targetJS = (try? JSONSerialization.data(withJSONObject: [target], options: [.fragmentsAllowed]))
+            .flatMap { String(data: $0, encoding: .utf8) }?
+            .replacingOccurrences(of: "'", with: "\\u0027")
+            .replacingOccurrences(of: "<", with: "\\u003c") ?? "[\"\"]"
+        let safeHost = host.replacingOccurrences(of: "<", with: "&lt;")
+        let html = """
+        <html><head><meta name="viewport" content="width=device-width"><style>
+        body{font:15px -apple-system,sans-serif;color:#666;display:flex;align-items:center;justify-content:center;height:90vh;text-align:center}
+        h1{font-size:22px;color:#333} button{font:15px -apple-system;padding:8px 18px;border-radius:9px;border:0;background:#0a84ff;color:#fff}
+        @media (prefers-color-scheme:dark){body{background:#1c1c1e;color:#aaa}h1{color:#eee}}
+        </style></head><body><div><h1>This page keeps crashing</h1>
+        <p>\(safeHost) ran out of memory or crashed twice in a row, so Inkwell stopped reloading it.</p>
+        <p>Closing other tabs can help.</p>
+        <button onclick='location.href=\(targetJS)[0]'>Try Again</button></div></body></html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
     }
 }
 
