@@ -62,6 +62,16 @@ Open `InkwellBrowser.swiftpm` in Xcode, select your iPad as the run destination,
 
 Before an extension is added, a dialog shows which sites and permissions it wants, the way desktop Chrome does. Later permission requests are also confirmed in a dialog.
 
+## Default browser and opening links from other apps
+
+- **Default browser:** iPadOS only lets an app become the default browser if Apple has granted it the `com.apple.developer.web-browser` entitlement. To get it:
+  1. Use a paid Apple Developer account and request the entitlement from Apple.
+  2. Enable it on the app's App ID.
+  3. Sign the app with that account.
+
+  Inkwell already registers for `http`/`https` links, asks once per launch whether you want to make it the default, and has a **Settings → Default browser** section. Both only appear when the entitlement is present. Sideloaded copies signed with a free Apple ID can't be the default.
+- **Links from Shortcuts or other apps (works today):** start the address with `inkwells://` instead of `https://` (or `inkwellhttp://` instead of `http://`), or use `inkwell://open?url=<link>` / `inkwell://open?q=<search>`. The page opens in a new tab.
+
 ## Chrome compatibility layer
 
 Many Chrome extensions use Chrome-only APIs that WebKit doesn't have. When Inkwell installs or loads an extension, it adds a small script (`__inkwell_compat.js`) that fills these in:

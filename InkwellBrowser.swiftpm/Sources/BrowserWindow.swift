@@ -111,7 +111,18 @@ final class BrowserWindow: UIViewController {
         WindowRegistry.shared.remove(self)
     }
 
+    /// True once the first tabs are restored, so incoming links can open here.
+    private(set) var isReady = false
+
     private func restoreOrOpenFirstTab() {
+        defer {
+            isReady = true
+            for url in LinkRouter.takePending() { openTab(url: url, select: true) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.presentedViewController == nil else { return }
+                DefaultBrowser.askIfAppropriate(from: self)
+            }
+        }
         guard tabs.isEmpty else { return }
         if let session = SessionStore.takeSavedSession() {
             for url in session.urls { openTab(url: url, select: false) }

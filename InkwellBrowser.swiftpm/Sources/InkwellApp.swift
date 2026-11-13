@@ -13,6 +13,7 @@ struct InkwellApp: App {
         WindowGroup {
             BrowserWindowView()
                 .ignoresSafeArea(.container, edges: .bottom)
+                .onOpenURL { url in LinkRouter.open(url) }
         }
     }
 }

@@ -155,6 +155,8 @@ struct SettingsView: View {
                     Toggle("Show bookmarks bar", isOn: $showBookmarksBar)
                 }
 
+                DefaultBrowserSection()
+
                 Section("About") {
                     LabeledContent("Version", value: AppInfo.build)
                 }

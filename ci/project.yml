@@ -28,6 +28,13 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Inkwell Browser
+        # http/https let iPadOS offer Inkwell as the default browser (with Apple's web-browser
+        # entitlement); the inkwell schemes let Shortcuts and other apps open links here today.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.mangashaduston.inkwellbrowser.web
+            CFBundleURLSchemes: [http, https]
+          - CFBundleURLName: com.mangashaduston.inkwellbrowser.links
+            CFBundleURLSchemes: [inkwell, inkwells, inkwellhttp]
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
